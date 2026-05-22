@@ -476,6 +476,8 @@ def generate_runconfig(
     threads_per_worker: int = 2,
     n_parallel_bursts: int = 1,
     block_shape: tuple[int, int] = (512, 512),
+    azimuth_blocks: int = 1,
+    halo_rows: Optional[int] = None,
     product_version: str = "0.4",
     runconfig_file: Optional[Path] = None,
 ) -> tuple[Path, Path]:
@@ -526,6 +528,14 @@ def generate_runconfig(
         (``worker_settings.block_shape``).  Default ``(512, 512)``.
         Use larger values e.g. ``(2048, 2048)`` to reduce I/O overhead on
         systems with sufficient RAM.
+    azimuth_blocks : int
+        Split each NISAR GSLC frame into this many azimuth blocks and process
+        each block in parallel.  Default 1 (full-frame run).  Set
+        ``n_parallel_bursts`` to the same value to exploit the parallelism.
+    halo_rows : int or None
+        Overlap rows added on each side of an azimuth block to avoid edge
+        artefacts.  If None, dolphin derives the minimum safe value from
+        half_window, the similarity search radius, and the strides.
     product_version : str
         Product version string in ``<major>.<minor>`` format.
     runconfig_file : Path or None
@@ -569,6 +579,8 @@ def generate_runconfig(
             frame_id=frame_id,
             frequency=frequency,
             polarization=polarization,
+            azimuth_blocks=azimuth_blocks,
+            halo_rows=halo_rows,
         ),
         dynamic_ancillary_file_group=DynamicAncillaryFileGroup(
             algorithm_parameters_file=algorithm_parameters_file,
