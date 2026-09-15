@@ -476,6 +476,8 @@ def generate_runconfig(
     threads_per_worker: int = 2,
     n_parallel_bursts: int = 1,
     block_shape: tuple[int, int] = (512, 512),
+    azimuth_blocks: int = 1,
+    halo_rows: Optional[int] = None,
     product_version: str = "0.4",
     runconfig_file: Optional[Path] = None,
 ) -> tuple[Path, Path]:
@@ -526,6 +528,12 @@ def generate_runconfig(
         (``worker_settings.block_shape``).  Default ``(512, 512)``.
         Use larger values e.g. ``(2048, 2048)`` to reduce I/O overhead on
         systems with sufficient RAM.
+    azimuth_blocks : int
+        Number of azimuth blocks to split the frame into for parallel
+        processing.  Default 1 (no splitting).
+    halo_rows : int or None
+        Rows of overlap kept on each side of an azimuth block.
+        If None, a default derived from the phase-linking window is used.
     product_version : str
         Product version string in ``<major>.<minor>`` format.
     runconfig_file : Path or None
@@ -595,6 +603,8 @@ def generate_runconfig(
     runconfig.worker_settings.threads_per_worker = threads_per_worker
     runconfig.worker_settings.n_parallel_bursts = n_parallel_bursts
     runconfig.worker_settings.block_shape = list(block_shape)
+    runconfig.azimuth_blocks = azimuth_blocks
+    runconfig.halo_rows = halo_rows
 
     runconfig.to_yaml(runconfig_file)
 
@@ -694,6 +704,26 @@ def generate_runconfig(
     help="Number of bursts/chunks to process in parallel.",
 )
 @click.option(
+    "--azimuth-blocks",
+    default=1,
+    show_default=True,
+    type=int,
+    help=(
+        "Split each NISAR GSLC frame into this many azimuth blocks. "
+        "Set --n-parallel-bursts to the same value for full parallelism."
+    ),
+)
+@click.option(
+    "--halo-rows",
+    default=None,
+    show_default=True,
+    type=int,
+    help=(
+        "Overlap rows on each side of an azimuth block. "
+        "Default: auto-computed by dolphin from half_window and stride settings."
+    ),
+)
+@click.option(
     "--block-shape",
     nargs=2,
     type=int,
@@ -735,6 +765,8 @@ def make_runconfig_cli(
     save_compressed_slc,
     threads_per_worker,
     n_parallel_bursts,
+    azimuth_blocks,
+    halo_rows,
     block_shape,
     product_version,
     outfile,
@@ -779,6 +811,8 @@ def make_runconfig_cli(
         threads_per_worker=threads_per_worker,
         n_parallel_bursts=n_parallel_bursts,
         block_shape=tuple(block_shape),
+        azimuth_blocks=azimuth_blocks,
+        halo_rows=halo_rows,
         product_version=product_version,
         runconfig_file=Path(outfile) if outfile else None,
     )

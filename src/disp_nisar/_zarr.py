@@ -60,7 +60,9 @@ def _make_compressor(name: str = "lz4"):
     cname = cname_map.get(name, "lz4")
     if cname is None:
         return []
-    return [BloscCodec(cname=cname, clevel=5, shuffle="shuffle")]
+    # clevel=1 is ~3× faster to encode than clevel=5 with near-identical ratio
+    # on complex SAR data (lz4 plateaus early).
+    return [BloscCodec(cname=cname, clevel=1, shuffle="shuffle")]
 
 
 # ---------------------------------------------------------------------------
@@ -73,9 +75,11 @@ def gslc_to_zarr(
     output_path: str | Path,
     freqs: Sequence[str] = ("A",),
     pol: str = "HH",
-    spatial_chunks: int = 512,
-    row_batch: int = 1024,
+    spatial_chunks: int = 2048,
+    row_batch: int = 2048,
+    num_workers: int = 0,
     compressor: str = "lz4",
+    blosc_threads: int = 0,
     overwrite: bool = False,
     progress: bool = True,
 ) -> Any:
@@ -94,13 +98,22 @@ def gslc_to_zarr(
     spatial_chunks:
         Spatial chunk size in pixels (both x and y). The time dimension is
         always chunked as ``n_dates`` so every phase-linking block is one chunk.
+        Should match the phase-linking block size (default 2048).
     row_batch:
-        Number of HDF5 rows to read at once.  Controls peak memory usage:
-        ``n_dates × row_batch × nx × 8 bytes``.
-        Default 1024 rows → ~3.4 GB peak for freqA with 6 dates.
-        Use 512 for tighter memory budgets.
+        Number of HDF5 rows to read at once.  Must equal ``spatial_chunks``
+        to avoid partial-chunk read-merge-write cycles on write.
+        Controls peak memory: ``n_dates × row_batch × nx × 8 bytes``
+        (e.g. 4 dates × 2048 × 70 K cols ≈ 4.6 GB).
+    num_workers:
+        Number of threads to read HDF5 files in parallel.  ``0`` (default)
+        means use ``n_dates`` threads — one per file.  h5py releases the GIL
+        during I/O so threads genuinely overlap.  Set to ``1`` to disable.
     compressor:
         Blosc compressor: ``'lz4'`` (fast), ``'zstd'`` (best ratio), ``'none'``.
+    blosc_threads:
+        Number of internal threads Blosc uses to compress each chunk.
+        ``0`` (default) picks ``min(8, os.cpu_count()//2)``. Parallel compression
+        is the dominant cost when ``compressor != 'none'``.
     overwrite:
         Recreate the store if it already exists.
     progress:
@@ -118,6 +131,11 @@ def gslc_to_zarr(
     Full write time depends on I/O bandwidth; ~30–90 min on a fast NFS/SSD.
 
     """
+    import os
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Thread
+
     import h5py
     import zarr
 
@@ -132,6 +150,20 @@ def gslc_to_zarr(
     n_dates = len(file_list)
     dates = [_parse_date(f) for f in file_list]
     output_path = Path(output_path)
+    n_threads = n_dates if num_workers == 0 else max(1, num_workers)
+
+    # Fix 5: parallelize Blosc compression. Try blosc2 first (zarr-v3 default),
+    # then plain blosc. Silently no-op if neither exposes set_nthreads.
+    if blosc_threads <= 0:
+        blosc_threads = max(1, min(8, (os.cpu_count() or 2) // 2))
+    for _mod_name in ("blosc2", "blosc"):
+        try:
+            _mod = __import__(_mod_name)
+            _mod.set_nthreads(blosc_threads)
+            print(f"{_mod_name}.set_nthreads({blosc_threads})")
+            break
+        except (ImportError, AttributeError):
+            continue
 
     if output_path.exists():
         if not overwrite:
@@ -150,6 +182,37 @@ def gslc_to_zarr(
 
     # Keep all HDF5 files open for the duration of the write
     handles = [h5py.File(f, "r") for f in file_list]
+
+    def _read_one(args: tuple) -> tuple:
+        """Read one date's SLC + mask rows from its open HDF5 handle."""
+        i, h, grp_path, pol, row_start, row_end = args
+        slc = h[f"{grp_path}/{pol}"][row_start:row_end, :]
+        msk = h[f"{grp_path}/mask"][row_start:row_end, :]
+        return i, slc, msk
+
+    # Fix 4: producer/consumer so read+mask of batch N+1 overlaps with
+    # compress+write of batch N. maxsize=1 caps memory at ~3 batches in flight
+    # (one being written, one in queue, one being read).
+    write_q: queue.Queue = queue.Queue(maxsize=1)
+    writer_error: list[BaseException] = []
+
+    def _writer() -> None:
+        while True:
+            item = write_q.get()
+            try:
+                if item is None:
+                    return
+                rs, re_, sbuf, mbuf, sarr, marr = item
+                sarr[:, rs:re_, :] = sbuf
+                marr[:, rs:re_, :] = mbuf
+            except BaseException as exc:  # noqa: BLE001
+                writer_error.append(exc)
+                return
+            finally:
+                write_q.task_done()
+
+    writer_thread = Thread(target=_writer, name="zarr-writer", daemon=True)
+    writer_thread.start()
 
     try:
         for freq_letter in freqs:
@@ -202,35 +265,62 @@ def gslc_to_zarr(
             raw_gb = n_dates * ny * nx * np.dtype(dtype).itemsize / 1e9
             print(
                 f"freq{freq_letter.upper()}/{pol}: ({n_dates}, {ny}, {nx}) "
-                f"{dtype}  raw={raw_gb:.1f} GB  chunks={chunks}"
+                f"{dtype}  raw={raw_gb:.1f} GB  chunks={chunks}  "
+                f"threads={n_threads}"
             )
 
             row_starts = range(0, ny, row_batch)
-            for row_start in tqdm(
-                row_starts,
-                desc=f"freq{freq_letter.upper()}→zarr",
-                unit="batch",
-                disable=not progress,
-            ):
-                row_end = min(row_start + row_batch, ny)
-                nrows = row_end - row_start
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                for row_start in tqdm(
+                    row_starts,
+                    desc=f"freq{freq_letter.upper()}→zarr",
+                    unit="batch",
+                    disable=not progress,
+                ):
+                    row_end = min(row_start + row_batch, ny)
+                    nrows = row_end - row_start
 
-                slc_buf = np.empty((n_dates, nrows, nx), dtype=dtype)
-                mask_buf = np.empty((n_dates, nrows, nx), dtype="uint8")
+                    slc_buf = np.empty((n_dates, nrows, nx), dtype=dtype)
+                    mask_buf = np.empty((n_dates, nrows, nx), dtype="uint8")
 
-                for i, h in enumerate(handles):
-                    slc_buf[i] = h[f"{grp_path}/{pol}"][row_start:row_end, :]
-                    mask_buf[i] = h[f"{grp_path}/mask"][row_start:row_end, :]
+                    # Read all dates in parallel — each thread reads a
+                    # different HDF5 file handle, so no locking needed.
+                    args = [
+                        (i, h, grp_path, pol, row_start, row_end)
+                        for i, h in enumerate(handles)
+                    ]
+                    for i, slc, msk in pool.map(_read_one, args):
+                        slc_buf[i] = slc
+                        mask_buf[i] = msk
 
-                # Zero out invalid pixels (mask==0) so downstream JAX/cuSolver
-                # never receives NaN. Dolphin skips blocks that are all-zero,
-                # so this converts nodata edge regions to skippable zeros.
-                slc_buf[mask_buf == 0] = 0
+                    # NISAR GSLC mask: 1 = valid, 255 = nodata (never 0).
+                    # Zero out nodata pixels so downstream JAX/cuSolver never
+                    # receives NaN.  np.nan_to_num catches any residual NaNs in
+                    # pixels that slipped through with valid-looking mask values.
+                    slc_buf[mask_buf != 1] = 0
+                    np.nan_to_num(slc_buf, copy=False)
 
-                slc_arr[:, row_start:row_end, :] = slc_buf
-                mask_arr[:, row_start:row_end, :] = mask_buf
+                    # Hand off to background writer; blocks here if the writer
+                    # is still busy with the previous batch (back-pressure).
+                    if writer_error:
+                        raise writer_error[0]
+                    write_q.put(
+                        (row_start, row_end, slc_buf, mask_buf, slc_arr, mask_arr)
+                    )
+
+            # Drain this frequency's queued writes before moving to the next
+            # `freq_grp` so we don't interleave assignments to different arrays.
+            write_q.join()
+            if writer_error:
+                raise writer_error[0]
 
     finally:
+        # Stop writer cleanly, then close HDF5 handles.
+        try:
+            write_q.put(None)
+            writer_thread.join(timeout=120)
+        except Exception:
+            pass
         for h in handles:
             try:
                 h.close()
@@ -292,6 +382,10 @@ class ZarrStack:
         self._root_meta = dict(root.attrs)
 
     # -- DatasetReader protocol ------------------------------------------------
+
+    # Zarr reads are thread-safe; dolphin checks this attribute to skip the
+    # global read_lock and allow all workers to read simultaneously.
+    thread_safe = True
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -389,6 +483,28 @@ class ZarrStack:
             da_arr = da_arr.rechunk(chunks)
         return da_arr
 
+    def slice_dates(self, file_list: "Sequence[str | Path]") -> "ZarrStackSlice | None":
+        """Return a time-sliced view for the given subset of source files.
+
+        Used by ``run_wrapped_phase_sequential`` to create per-ministack
+        readers that pull directly from the zarr store instead of re-reading
+        the source HDF5 files.
+
+        Returns ``None`` if any file in *file_list* is not present in this
+        store (e.g. compressed SLCs produced by a previous ministack), in
+        which case the caller should fall back to a VRTStack.
+        """
+        file_map = {str(f): i for i, f in enumerate(self.file_list)}
+        indices: list[int] = []
+        matched: list[Path] = []
+        for f in file_list:
+            idx = file_map.get(str(f))
+            if idx is None:
+                return None
+            indices.append(idx)
+            matched.append(Path(f))
+        return ZarrStackSlice(self, indices, matched)
+
     def __repr__(self) -> str:
         ny, nx = self.shape[1], self.shape[2]
         return (
@@ -396,6 +512,87 @@ class ZarrStack:
             f"shape=({self.n_dates}, {ny}, {nx})  "
             f"dtype={self.dtype}  dates={self.dates[0]}…{self.dates[-1]})"
         )
+
+
+class ZarrStackSlice:
+    """Time-sliced view of a :class:`ZarrStack` for per-ministack processing.
+
+    Implements the same ``DatasetReader`` / ``VRTStack``-compatible protocol
+    as ``ZarrStack`` but exposes only a subset of the time dimension.
+    Passed as *vrt_stack* to ``run_wrapped_phase_single`` so that phase
+    linking reads directly from zarr instead of re-opening the HDF5 files.
+    """
+
+    thread_safe = True
+
+    def __init__(
+        self,
+        parent: "ZarrStack",
+        indices: list[int],
+        file_list: list[Path],
+    ) -> None:
+        self._parent = parent
+        self._indices = indices
+        self._file_list = file_list
+
+    # -- DatasetReader protocol ------------------------------------------------
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return (len(self._indices),) + self._parent.shape[1:]
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._parent.dtype
+
+    @property
+    def ndim(self) -> int:
+        return 3
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        # EagerLoader calls reader[:, row_slice, col_slice].
+        # Map the time axis through self._indices.
+        if isinstance(key, tuple) and len(key) == 3:
+            t_key, row_key, col_key = key
+        elif isinstance(key, tuple) and len(key) == 2:
+            t_key, row_key = key
+            col_key = slice(None)
+        else:
+            t_key = key
+            row_key = col_key = slice(None)
+
+        if t_key is Ellipsis or t_key == slice(None):
+            idx: Any = self._indices
+        elif isinstance(t_key, int):
+            idx = self._indices[t_key]
+        elif isinstance(t_key, slice):
+            idx = self._indices[t_key]
+        else:
+            idx = [self._indices[i] for i in t_key]
+
+        # oindex supports orthogonal (list-of-ints × slice × slice) reads
+        return np.asarray(self._parent._arr.oindex[idx, row_key, col_key])
+
+    # -- VRTStack compatibility ------------------------------------------------
+
+    @property
+    def outfile(self) -> str:
+        """GDAL-readable path used as *like_filename* for output file setup."""
+        return self._parent.gdal_path
+
+    @property
+    def file_list(self) -> list[Path]:
+        return self._file_list
+
+    @property
+    def subdataset(self) -> str:
+        return self._parent.subdataset
+
+    def __fspath__(self) -> str:
+        return self._parent.gdal_path
+
+    def __repr__(self) -> str:
+        return f"ZarrStackSlice({len(self._indices)} dates of {self._parent!r})"
 
 
 class ZarrMaskView:

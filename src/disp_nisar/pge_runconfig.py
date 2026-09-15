@@ -319,6 +319,25 @@ class RunConfig(YamlModel):
     # General workflow metadata
     worker_settings: WorkerSettings = Field(default_factory=WorkerSettings)
 
+    azimuth_blocks: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Split each NISAR GSLC frame into this many azimuth blocks and process"
+            " each block in parallel. Default 1 = no splitting (full-frame run)."
+            " Set n_parallel_bursts in worker_settings to the same value to fully"
+            " exploit parallelism."
+        ),
+    )
+    halo_rows: Optional[int] = Field(
+        default=None,
+        description=(
+            "Overlap rows added on each side of an azimuth block to avoid edge"
+            " artefacts. If None, dolphin computes the minimum safe value from"
+            " half_window, similarity search radius, and stride settings."
+        ),
+    )
+
     log_file: Optional[Path] = Field(
         default=Path("output/disp_nisar_workflow.log"),
         description="Path to the output log file in addition to logging to stderr.",
@@ -517,6 +536,8 @@ class RunConfig(YamlModel):
         input_options = {
             "subdataset": nisar_dataset_name,
             "wavelength": wavelength,
+            "azimuth_blocks": self.azimuth_blocks,
+            "halo_rows": self.halo_rows,
         }  # param_dict.pop("subdataset")}
         param_dict["output_options"]["epsg"] = bounds_epsg
         param_dict["output_options"]["bounds"] = bounds
