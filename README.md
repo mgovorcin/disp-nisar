@@ -21,7 +21,6 @@ Creates the science application software (SAS) using the [dolphin](https://githu
 [conda-link]:               https://github.com/conda-forge/disp-nisar-feedstock
 [github-discussions-badge]: https://img.shields.io/static/v1?label=Discussions&message=Ask&color=blue&logo=github
 [github-discussions-link]:  https://github.com/opera-adt/disp-nisar/discussions
-
 <!-- prettier-ignore-end -->
 
 

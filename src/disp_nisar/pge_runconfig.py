@@ -31,7 +31,7 @@ from opera_utils import (
 )
 
 try:
-    from opera_utils.datasets import fetch_nisar_frame_to_bounds_file
+    from opera_utils.nisar import fetch_nisar_frame_to_bounds_file
 except ImportError:
     import pooch
 
@@ -41,13 +41,13 @@ except ImportError:
     )
     _NISAR_POOCH = pooch.create(
         path=pooch.os_cache("opera_utils"),
-        base_url="https://github.com/opera-adt/disp-nisar/raw/main/configs/static_ancillary_files/",
+        base_url="https://github.com/opera-adt/nisar_db/releases/download/v{version}/",
         version=_NISAR_FRAME_DB_VERSION,
         version_dev="main",
         env="OPERA_UTILS_DATA_DIR",
         registry={
             _NISAR_FRAME_TO_BOUNDS_FILENAME: (
-                "f9f2e64f34cedadb9a35d7a792990f684f153eb5463a80d5b26982a942ea1a03"
+                "857ea668056c8b8924047eb4d621ca884597c102a01fd7d6b8c1c8eca4ff6a1b"
             ),
         },
     )
@@ -564,8 +564,24 @@ class RunConfig(YamlModel):
             "halo_rows": self.input_file_group.halo_rows,
         }  # param_dict.pop("subdataset")}
         param_dict["output_options"]["epsg"] = bounds_epsg
-        param_dict["output_options"]["bounds"] = bounds
-        param_dict["output_options"]["bounds_epsg"] = bounds_epsg
+        # The processing box: an explicit `output_options.bounds` in the
+        # algorithm parameters is an operator's area of interest and is kept;
+        # only when none is given does the whole frame from the bounds
+        # database apply. The frame box is still what the GSLC extent was
+        # checked against above -- an AOI is a subset of the frame, not a
+        # replacement for it. (Before this, the frame box was written
+        # unconditionally and a configured AOI was silently discarded.)
+        if algo_params.output_options.bounds is None:
+            param_dict["output_options"]["bounds"] = bounds
+            param_dict["output_options"]["bounds_epsg"] = bounds_epsg
+        else:
+            logger.info(
+                "Using output_options.bounds %s (EPSG:%s) from the algorithm"
+                " parameters instead of the full frame %s bounds",
+                algo_params.output_options.bounds,
+                algo_params.output_options.bounds_epsg,
+                frame_id,
+            )
         # Always turn off overviews (won't be saved in the HDF5 anyway)
         param_dict["output_options"]["add_overviews"] = False
         # Always turn off velocity (not used) in output product

@@ -237,10 +237,8 @@ def download_dem(config: DEMConfig, polygons: list[Polygon]) -> None:
         translate_dem(vrt_path, output_path, bounds)
 
     gdal.BuildVRT(str(config.output_path), dem_files)
-
-    # Cleanup intermediate files
-    for file in dem_files:
-        Path(file).unlink()
+    # Note: the tile GeoTIFFs are kept on disk alongside the VRT, since the
+    # VRT references them by relative path.
 
 
 def stage_dem(
