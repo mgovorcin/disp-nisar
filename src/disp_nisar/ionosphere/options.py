@@ -25,5 +25,23 @@ class IonosphereOptions(BaseModel):
             " settings."
         ),
     )
+    d_looks: int = Field(
+        1,
+        ge=1,
+        le=64,
+        description=(
+            "Unwrap the double-difference D on a grid this many times coarser than the"
+            " B grid (phasor average over donor pixels), then upsample. 1 = native."
+        ),
+    )
+    d_looks_min_fraction: float = Field(
+        0.1,
+        gt=0,
+        le=1,
+        description=(
+            "Smallest donor fraction of a coarse block that still counts as a D"
+            " observation."
+        ),
+    )
     resume: bool = True
     keep_intermediates: bool = False

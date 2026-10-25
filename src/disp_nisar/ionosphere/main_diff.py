@@ -212,6 +212,19 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
         raise ValueError(f"main_diff supports snaphu or whirlwind; received {method!r}")
     result = dict(prepared)
     for band in ("A", "D"):
+        published = folder.parent / f"{band}.unw.tif"
+        published_cc = folder.parent / f"{band}.unw.conncomp.tif"
+        if options.resume and published.is_file() and published_cc.is_file():
+            # Per-band resume: a band already unwrapped for this pair is reused (the
+            # pair-level resume above needs all three published files; this lets a
+            # D-only rerun keep A).
+            import shutil
+
+            for src in (published, published_cc):
+                shutil.copy2(src, folder / src.name)
+            result[f"{band}_unw"] = folder / published.name
+            result[f"{band}_cc"] = folder / published_cc.name
+            continue
         cfg = unwrap_options.model_copy(deep=True)
         if method == "whirlwind":
             # Use the existing GSLC/quality-aware Dolphin interpolation.
@@ -228,6 +241,12 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
         cfg.preprocess_options.interpolation_similarity_threshold = (
             options.similarity_threshold
         )
+        if band == "D" and options.d_looks > 1:
+            from .dlooks import unwrap_d_coarse
+
+            unw, cc = unwrap_d_coarse(prepared, folder, cfg, options, unwrap)
+            result[f"{band}_unw"], result[f"{band}_cc"] = Path(unw), Path(cc)
+            continue
         unw, cc = unwrap(
             ifg_filename=prepared[f"{band}_ifg"],
             corr_filename=prepared[f"{band}_cor"],
