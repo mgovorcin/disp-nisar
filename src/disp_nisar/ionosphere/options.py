@@ -25,5 +25,12 @@ class IonosphereOptions(BaseModel):
             " settings."
         ),
     )
+    strict_network: bool = Field(
+        False,
+        description=(
+            "Require identical A and B pair networks (historical behaviour). Off: use"
+            " the common real-date network, which is what forward mode needs."
+        ),
+    )
     resume: bool = True
     keep_intermediates: bool = False
