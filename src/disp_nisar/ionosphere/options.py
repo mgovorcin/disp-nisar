@@ -43,5 +43,15 @@ class IonosphereOptions(BaseModel):
             " observation."
         ),
     )
+    n_workers: int = Field(
+        1,
+        ge=1,
+        le=64,
+        description=(
+            "Pairs prepared and unwrapped in parallel processes (each holds one block"
+            " of every input plus its unwrapper's memory); the same count solves the"
+            " inversion windows in parallel. 1 = sequential, the original behaviour."
+        ),
+    )
     resume: bool = True
     keep_intermediates: bool = False
