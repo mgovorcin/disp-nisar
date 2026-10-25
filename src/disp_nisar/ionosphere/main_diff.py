@@ -21,6 +21,7 @@ import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
+from rasterio.warp import reproject
 from rasterio.windows import Window
 
 from ._main_diff_io import (
@@ -655,6 +656,81 @@ def _run_locked(
         for source, destination in zip(temporary, intermediate, strict=True):
             source.replace(destination)
 
+    near_band = None
+    if options.smoothing == "robust" and options.near_range_exclude_km > 0:
+        # the incidence raster (static layers) is optional input; without it the band
+        # cannot be located
+        inc_path = getattr(options, "incidence_path", None) or (
+            out_dir / "incidence.tif"
+        )
+        if Path(inc_path).is_file():
+            from .smoothing import near_range_band
+
+            inc = np.full((target.height, target.width), np.nan, "float32")
+            with rasterio.open(inc_path) as src:
+                reproject(
+                    src.read(1).astype("float32"),
+                    inc,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    src_nodata=src.nodata,
+                    dst_transform=target.transform,
+                    dst_crs=target.crs,
+                    dst_nodata=np.nan,
+                    resampling=Resampling.average,
+                )
+            foot = np.zeros((target.height, target.width), bool)
+            for p in intermediate:
+                with rasterio.open(p) as ds:
+                    foot |= np.isfinite(
+                        ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+                    )
+            near_band = near_range_band(
+                foot, inc, abs(target.transform.a), options.near_range_exclude_km
+            )
+            logger.info(
+                "near-range band of %.1f km excluded from the screen: %.1f %% of the"
+                " footprint",
+                options.near_range_exclude_km,
+                100 * near_band[foot].mean(),
+            )
+        else:
+            logger.warning(
+                "near_range_exclude_km set but no incidence raster at %s; band not"
+                " excluded",
+                inc_path,
+            )
+    noise_w = None
+    if options.smoothing == "robust" and options.noise_weights:
+        from .smoothing import empirical_noise, noise_weights
+
+        noise_path = correction_dir / "ionosphere_noise.rad.tif"
+        if options.resume and noise_path.is_file():
+            with rasterio.open(noise_path) as ds:
+                noise = ds.read(1)
+        else:
+
+            def _epochs():
+                for p in intermediate:
+                    with rasterio.open(p) as ds:
+                        yield ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+
+            any_ok = np.zeros((target.height, target.width), bool)
+            for p in intermediate:
+                with rasterio.open(p) as ds:
+                    any_ok |= np.isfinite(
+                        ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+                    )
+            noise = empirical_noise(_epochs(), any_ok, options.smooth_fallback_sigma_px)
+            with rasterio.open(
+                noise_path, "w", **target.profile("float32", np.nan)
+            ) as dst:
+                dst.write(noise, 1)
+                dst.set_band_unit(1, "radians")
+                dst.update_tags(
+                    description="RMS over epochs of the screen minus its 10 km smooth"
+                )
+        noise_w = noise_weights(noise, np.isfinite(noise))
     outputs = []
     for i, (src, match, name) in enumerate(
         zip(intermediate, products, names, strict=True)
@@ -705,12 +781,30 @@ def _run_locked(
             if not eroded_donors.any():
                 raise ValueError(f"{name}: no donors remain after mask erosion")
 
-            iono_filled, quality_mask = apply_similarity_mask_and_fill(
-                iono=iono,
-                sim_mask=trusted,
-                existing_mask=footprint,
-                **fill_settings,
-            )
+            if options.smoothing == "robust":
+                from .smoothing import smooth_screen
+
+                iono_filled, quality_mask, _ = smooth_screen(
+                    iono,
+                    trusted,
+                    footprint,
+                    noise_w,
+                    options.smooth_sigma_px,
+                    min_support=options.smooth_min_support,
+                    fallback_sigma_px=options.smooth_fallback_sigma_px,
+                    clip_max_dev=(2 * np.pi * options.background_clip_cycles) or None,
+                    clip_block_px=options.background_block_px,
+                    noise=noise if noise_w is not None else None,
+                    exclude_noise_factor=options.exclude_noise_factor or None,
+                    exclude_mask=near_band,
+                )
+            else:
+                iono_filled, quality_mask = apply_similarity_mask_and_fill(
+                    iono=iono,
+                    sim_mask=trusted,
+                    existing_mask=footprint,
+                    **fill_settings,
+                )
             logger.info(
                 "%s: ionosphere valid before=%d, after=%d",
                 name,
@@ -728,6 +822,7 @@ def _run_locked(
                 dst.update_tags(
                     ionosphere_method="main_diff",
                     phase_convention="dolphin_ifg_ref_times_conj_sec",
+                    smoothing=options.smoothing,
                 )
             temporary_filled.replace(filled_path)
 
