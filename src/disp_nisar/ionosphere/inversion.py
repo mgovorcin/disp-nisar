@@ -164,12 +164,18 @@ def invert_common_phase_block(
     patterns, groups = np.unique(
         np.packbits(mask.T, axis=1), axis=0, return_inverse=True
     )
+    # Pixels sorted by pattern once, so each pattern's pixels are one slice (a
+    # per-pattern `groups == i` scan costs patterns x pixels, thousands x 1e6 per
+    # block).
+    groups = np.asarray(groups).ravel()
+    order = np.argsort(groups, kind="stable")
+    bounds = np.searchsorted(groups[order], np.arange(len(patterns) + 1))
     for i, packed in enumerate(patterns):
         use = np.unpackbits(packed, count=n).astype(bool)
         sub = design_matrix[use].astype(np.float64)
         if sub.shape[0] < count or np.linalg.matrix_rank(sub) < count:
             continue
-        pixels = np.flatnonzero(groups == i)
+        pixels = order[bounds[i] : bounds[i + 1]]
         operator = np.linalg.pinv(sub)
         out_a[:, pixels] = operator @ a[np.ix_(use, pixels)]
         out_d[:, pixels] = operator @ d[np.ix_(use, pixels)]
