@@ -327,8 +327,23 @@ def select_common_reference(
 
 
 def _invert_jobs(
-    jobs, pairs, grid, reference, f_a, f_b, outputs, output_pairs, block_size
+    jobs,
+    pairs,
+    grid,
+    reference,
+    f_a,
+    f_b,
+    outputs,
+    output_pairs,
+    block_size,
+    d_outputs=None,
 ):
+    """Invert the A and D pair networks and write the per-output-pair ionosphere.
+
+    The ionosphere is in radians at f_A. When `d_outputs` is given (one path per output
+    pair), the per-epoch inverted D is written as well: the band difference per epoch,
+    which is what the epoch line test (epoch_qc) runs on in the main_diff path.
+    """
     dates = sorted({d for pair in pairs for d in pair})
     idx = {d: i for i, d in enumerate(dates)}
     design = build_design_matrix(pairs, dates)
@@ -359,6 +374,20 @@ def _invert_jobs(
                 phase_convention="dolphin_ifg_ref_times_conj_sec",
                 ionosphere_method="main_diff",
             )
+        d_writers = []
+        if d_outputs is not None:
+            d_writers = [
+                stack.enter_context(
+                    rasterio.open(p, "w", **grid.profile("float32", np.nan))
+                )
+                for p in d_outputs
+            ]
+            for dst in d_writers:
+                dst.set_band_unit(1, "radians")
+                dst.update_tags(
+                    phase_convention="dolphin_ifg_ref_times_conj_sec",
+                    content="per-epoch A minus B phase",
+                )
         for win in windows(grid, block_size):
             valid = np.stack([read_window(r["donor"], win) == 1 for r in readers])
             phases = {}
@@ -375,6 +404,10 @@ def _invert_jobs(
             series = np.concatenate((zero, iono))
             for dst, (ref, sec) in zip(writers, output_pairs, strict=True):
                 dst.write(series[idx[sec]] - series[idx[ref]], 1, window=win)
+            if d_writers:
+                series_d = np.concatenate((zero, d.astype(np.float32)))
+                for dst, (ref, sec) in zip(d_writers, output_pairs, strict=True):
+                    dst.write(series_d[idx[sec]] - series_d[idx[ref]], 1, window=win)
 
 
 def _export_correction(source, match, output, f_a, reference_a, block_size):
