@@ -23,12 +23,16 @@ def _write(path: Path, za: np.ndarray, zb: np.ndarray) -> None:
             g["yCoordinates"] = 4000000.0 - 5.0 * np.arange(z.shape[0])
 
 
-def _stack(tmp_path, line_date=None, decorrelated_date=None, seed=0):
+def _stack(
+    tmp_path, line_date=None, decorrelated_date=None, every_date_line=False, seed=0
+):
     """Build a synthetic stack, optionally with one bad date.
 
     Each band has coherent speckle (independent between bands) plus small noise.
     `line_date` adds 0.6 rad to band A only on one side of a tilted straight line;
-    `decorrelated_date` replaces half of the frame with new speckle in both bands.
+    `decorrelated_date` replaces half of the frame with new speckle in both bands;
+    `every_date_line` gives each date its own line at a different offset (frame-wide
+    ionosphere rather than a one-date artefact).
     """
     rng = np.random.default_rng(seed)
 
@@ -43,6 +47,9 @@ def _stack(tmp_path, line_date=None, decorrelated_date=None, seed=0):
     for d in DATES:
         za = sa + 0.3 * cplx(sa.shape)
         zb = sb + 0.3 * cplx(sb.shape)
+        if every_date_line:
+            off = 600.0 + 300.0 * DATES.index(d)
+            za = za * np.exp(1j * 0.6 * ((ya - 0.2 * xa) > off))
         if d == line_date:
             za = za * np.exp(1j * 0.6 * ((ya - 0.2 * xa) > 1200.0))
         if d == decorrelated_date:
@@ -78,3 +85,17 @@ def test_decorrelated_date_is_flagged(tmp_path):
     )
     assert (DATES[2], "gslc_decorrelated") in [(f.epoch, f.reason) for f in flags]
     assert all(f.epoch == DATES[2] for f in flags if f.reason == "gslc_decorrelated")
+
+
+def test_flagged_neighbour_does_not_leak_into_newest_date(tmp_path):
+    scores, flags = prescreen_dates(_stack(tmp_path, line_date=DATES[-3]), looks_y=8)
+    assert [(f.epoch, f.reason) for f in flags] == [(DATES[-3], "gslc_line")]
+    newest = next(s for s in scores if s["mode"] == "newest")
+    assert newest["epoch"] == DATES[-1]
+    assert newest["reference"] == f"{DATES[-4]}_{DATES[-2]}"  # skips the flagged t-2
+
+
+def test_lines_on_every_date_are_not_flagged(tmp_path):
+    scores, flags = prescreen_dates(_stack(tmp_path, every_date_line=True), looks_y=8)
+    assert all(s["line_score"] >= 14.0 for s in scores if s["mode"] == "interior")
+    assert [f for f in flags if f.reason == "gslc_line"] == []

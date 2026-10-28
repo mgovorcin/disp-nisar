@@ -16,9 +16,15 @@ t:
 - **Decorrelation**: median over pixels of log coh_ref minus the mean log coherence of
   the date's pairs; > 0 when the date's pairs are less coherent than the reference.
 
-On the ab36 frames the known artefacts scored 16-23 (line) or 0.47 (decorrelation)
-against at most 11.6 and 0.02 for clean dates (2026-10-26, two frames); the default
-thresholds sit between.
+A date is flagged when its line score is >= `line_min` *and* >= `line_rel_min` times
+the median interior line score of the frame (real ionosphere raises every date's score,
+as on Alaska frames; the relative test needs >= 3 interior dates), or when its
+decorrelation is >= `coherence_drop_min`. The newest date is scored against the two most
+recent dates not already flagged, so a bad neighbour does not leak into it.
+
+Thresholds (2026-10-27, three ab36 frames, 18 scored dates): the known artefact scored
+line 24.4 (1.9x the median) and decorrelation 0.48; real Alaska ionosphere scored line
+16.6-17.6 at 1.1-1.2x the median; winter decorrelation on clean dates reached 0.35.
 """
 
 from __future__ import annotations
@@ -235,15 +241,17 @@ def coherence_drop(pairs: Sequence[PairMaps], reference: PairMaps) -> float:
 def prescreen_dates(
     gslc_by_date: dict[str, str | Path],
     line_min: float = 14.0,
-    coherence_drop_min: float = 0.2,
+    line_rel_min: float = 1.6,
+    coherence_drop_min: float = 0.4,
     looks_y: int = 64,
     row_stride: int = 1,
     n_workers: int = 1,
 ) -> tuple[list[dict], list[EpochFlag]]:
     """Score every date with a reference pair and return (scores, flags).
 
-    Interior dates use the triplet (t-1, t, t+1); the newest date uses (t-2, t-1, t);
-    the oldest date has no reference pair and is not scored. Each pair is formed once.
+    Interior dates use the triplet (t-1, t, t+1); the newest date uses the two most
+    recent unflagged dates (a, b, t); the oldest date has no reference pair and is not
+    scored. Each pair is formed once; `reference` in each score names the pair (a, b).
     """
     dates = sorted(gslc_by_date)
     cache: dict[tuple[str, str], PairMaps] = {}
@@ -270,46 +278,51 @@ def prescreen_dates(
         w = min(m.d.shape[1] for m in maps)
         return [PairMaps(m.d[:h, :w], m.coherence[:h, :w]) for m in maps]
 
+    def score(t: str, mode: str, ref_dates: str, maps: list[PairMaps], sign: float):
+        p1, p2, ref = common(maps)
+        line, angle = date_line_score([(p1, 1.0), (p2, sign)], ref)
+        drop = coherence_drop([p1, p2], ref)
+        return {
+            "epoch": t,
+            "mode": mode,
+            "reference": ref_dates,
+            "line_score": line,
+            "angle_deg": angle,
+            "coherence_drop": drop,
+        }
+
+    def flag(s: dict, median: float) -> list[EpochFlag]:
+        out = []
+        rel = s["line_score"] / median if median > 0 else np.inf
+        s["line_rel"] = rel
+        if s["line_score"] >= line_min and rel >= line_rel_min:
+            out.append(EpochFlag(s["epoch"], "gslc_line", s["line_score"], np.nan))
+        if s["coherence_drop"] >= coherence_drop_min:
+            out.append(
+                EpochFlag(s["epoch"], "gslc_decorrelated", s["coherence_drop"], np.nan)
+            )
+        return out
+
     scores, flags = [], []
     try:
-        for k, t in enumerate(dates):
-            if 0 < k < len(dates) - 1:
-                p1, p2, ref = common(
-                    [
-                        pair(dates[k - 1], t),
-                        pair(t, dates[k + 1]),
-                        pair(dates[k - 1], dates[k + 1]),
-                    ]
-                )
-                signed = [(p1, 1.0), (p2, -1.0)]
-                mode = "interior"
-            elif k == len(dates) - 1 and k >= 2:
-                p1, p2, ref = common(
-                    [
-                        pair(dates[k - 1], t),
-                        pair(dates[k - 2], t),
-                        pair(dates[k - 2], dates[k - 1]),
-                    ]
-                )
-                signed = [(p1, 1.0), (p2, 1.0)]
-                mode = "newest"
-            else:
-                continue
-            line, angle = date_line_score(signed, ref)
-            drop = coherence_drop([p1, p2], ref)
-            scores.append(
-                {
-                    "epoch": t,
-                    "mode": mode,
-                    "line_score": line,
-                    "angle_deg": angle,
-                    "coherence_drop": drop,
-                }
-            )
-            if line >= line_min:
-                flags.append(EpochFlag(t, "gslc_line", line, float("nan")))
-            if drop >= coherence_drop_min:
-                flags.append(EpochFlag(t, "gslc_decorrelated", drop, float("nan")))
+        for k in range(1, len(dates) - 1):
+            a, t, b = dates[k - 1], dates[k], dates[k + 1]
+            maps = [pair(a, t), pair(t, b), pair(a, b)]
+            scores.append(score(t, "interior", f"{a}_{b}", maps, -1.0))
+        lines = [s["line_score"] for s in scores]
+        median = float(np.median(lines)) if len(lines) >= 3 else 0.0
+        for s in scores:
+            flags += flag(s, median)
+        if len(dates) >= 3:
+            t = dates[-1]
+            bad = {f.epoch for f in flags}
+            prior = [d for d in dates[:-1] if d not in bad][-2:]
+            if len(prior) == 2:
+                a, b = prior
+                maps = [pair(b, t), pair(a, t), pair(a, b)]
+                s = score(t, "newest", f"{a}_{b}", maps, 1.0)
+                scores.append(s)
+                flags += flag(s, median)
     finally:
         if executor is not None:
             executor.shutdown()
