@@ -1,11 +1,14 @@
 """GSLC pre-screen on small synthetic two-band GSLC stacks."""
 
+import json
 from pathlib import Path
 
 import h5py
 import numpy as np
 
 from disp_nisar.ionosphere.gslc_prescreen import prescreen_dates
+from disp_nisar.main import _prescreen_gslc_epochs
+from disp_nisar.pge_runconfig import AlgorithmParameters
 
 ROWS, COLS_A, COLS_B = 512, 512, 64  # A at 5 m, B at 40 x 5 m: same ground footprint
 DATES = [f"202601{d:02d}" for d in (1, 13, 25)] + ["20260206", "20260218"]
@@ -99,3 +102,26 @@ def test_lines_on_every_date_are_not_flagged(tmp_path):
     scores, flags = prescreen_dates(_stack(tmp_path, every_date_line=True), looks_y=8)
     assert all(s["line_score"] >= 14.0 for s in scores if s["mode"] == "interior")
     assert [f for f in flags if f.reason == "gslc_line"] == []
+
+
+def test_prescreen_is_off_by_default():
+    assert AlgorithmParameters().gslc_prescreen is False
+
+
+def test_workflow_prescreen_skips_compressed_and_writes_report(tmp_path):
+    files = _stack(tmp_path, line_date=DATES[2])
+    renamed = []
+    for d, f in files.items():  # date in the name as get_dates expects
+        g = f.with_name(f"NISAR_GSLC_{d}T000000_{d}T000010.h5")
+        f.rename(g)
+        renamed.append(g)
+    compressed = tmp_path / "compressed_20251201T000000_20251201T000010.h5"
+    compressed.write_bytes(b"")  # unreadable: would fail if it were scored
+    out = tmp_path / "report" / "gslc_prescreen.json"
+    flags = _prescreen_gslc_epochs(
+        [compressed, *renamed], out, row_stride=1, n_workers=1, looks_y=8
+    )
+    assert [(f.epoch, f.reason) for f in flags] == [(DATES[2], "gslc_line")]
+    report = json.loads(out.read_text())
+    assert report["flags"][0]["epoch"] == DATES[2]
+    assert {s["epoch"] for s in report["scores"]} == set(DATES[1:])

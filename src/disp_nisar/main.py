@@ -224,6 +224,20 @@ def run(
         # Drop the PS threshold to a conservative number to avoid false positives
         cfg.ps_options.amp_dispersion_threshold = 0.15
 
+    algorithm_parameters = AlgorithmParameters.from_yaml(
+        pge_runconfig.dynamic_ancillary_file_group.algorithm_parameters_file
+    )
+    if (
+        algorithm_parameters.gslc_prescreen
+        and not pge_runconfig.dynamic_ancillary_file_group.gunw_files
+    ):
+        _prescreen_gslc_epochs(
+            cfg.cslc_file_list,
+            out_file=cfg.work_directory / "gslc_prescreen.json",
+            row_stride=algorithm_parameters.gslc_prescreen_row_stride,
+            n_workers=max(1, cfg.worker_settings.n_parallel_bursts),
+        )
+
     # Run dolphin's displacement workflow
     # Note: For NISAR, there's no stitching needed since it's one huge frame
     out_paths = run_displacement(cfg=cfg, debug=debug, raise_on_empty=False)
@@ -695,6 +709,56 @@ def _build_frame_template(
     ds.FlushCache()
     ds = None
     return output_path
+
+
+def _prescreen_gslc_epochs(
+    input_file_list: Sequence[Path],
+    out_file: Path,
+    row_stride: int = 3,
+    n_workers: int = 1,
+    looks_y: int = 64,
+) -> list:
+    """Score the real GSLC dates before phase linking and report flagged epochs.
+
+    Compressed SLCs are skipped. Report only: the flags are logged as warnings and
+    written with all scores to `out_file`; the stack is not changed.
+    """
+    import json
+
+    from disp_nisar.ionosphere.gslc_prescreen import prescreen_dates
+
+    real = [
+        Path(f) for f in input_file_list if "compressed" not in Path(f).name.lower()
+    ]
+    gslc_by_date: dict[str, str | Path] = {
+        get_dates(f)[0].strftime("%Y%m%d"): f for f in real
+    }
+    if len(gslc_by_date) < 3:
+        logger.info("GSLC pre-screen needs >= 3 real dates; skipping")
+        return []
+    logger.info(
+        f"GSLC pre-screen of {len(gslc_by_date)} dates (row stride {row_stride})"
+    )
+    scores, flags = prescreen_dates(
+        gslc_by_date, looks_y=looks_y, row_stride=row_stride, n_workers=n_workers
+    )
+    for f in flags:
+        logger.warning(f"GSLC pre-screen flag: {f.epoch} {f.reason} {f.statistic:.2f}")
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(
+        json.dumps(
+            {
+                "scores": scores,
+                "flags": [
+                    {"epoch": f.epoch, "reason": f.reason, "statistic": f.statistic}
+                    for f in flags
+                ],
+            },
+            indent=2,
+            default=float,
+        )
+    )
+    return flags
 
 
 def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:

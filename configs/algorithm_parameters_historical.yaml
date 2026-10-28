@@ -369,6 +369,14 @@ browse_image_vmin_vmax:
 #   date. Valid choices are 3 (default) and 4.
 #   Type: integer.
 forward_mode_network_size: 3
+# Before phase linking, score every real GSLC date for two-band line artefacts and
+#   decorrelation. Report only: flags are logged and written to gslc_prescreen.json in
+#   the work directory; no date is dropped. Used with split-spectrum ionosphere.
+#   Type: boolean.
+gslc_prescreen: false
+# Read every n-th row window of the GSLCs in the pre-screen.
+#   Type: integer.
+gslc_prescreen_row_stride: 3
 # Number of output products to create in parallel.
 #   Type: integer.
 num_parallel_products: 4
