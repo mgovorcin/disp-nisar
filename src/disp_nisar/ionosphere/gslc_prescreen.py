@@ -17,14 +17,21 @@ t:
   the date's pairs; > 0 when the date's pairs are less coherent than the reference.
 
 A date is flagged when its line score is >= `line_min` *and* >= `line_rel_min` times
-the median interior line score of the frame (real ionosphere raises every date's score,
-as on Alaska frames; the relative test needs >= 3 interior dates), or when its
-decorrelation is >= `coherence_drop_min`. The newest date is scored against the two most
-recent dates not already flagged, so a bad neighbour does not leak into it.
+the frame's median first-pass line score (real ionosphere raises every date's score, as
+on Alaska frames; the relative test needs >= 3 scored dates), or when its
+decorrelation is >= `coherence_drop_min`. After a flag, the other dates are re-scored
+against their nearest unflagged neighbours, so a bad neighbour neither leaks into a
+clean date nor hides an adjacent artefact (re-scoring can need pairs more than three
+dates apart).
 
-Thresholds (2026-10-27, three ab36 frames, 18 scored dates): the known artefact scored
-line 24.4 (1.9x the median) and decorrelation 0.48; real Alaska ionosphere scored line
-16.6-17.6 at 1.1-1.2x the median; winter decorrelation on clean dates reached 0.35.
+Thresholds (2026-10-28, seven ab36 frames, 34 scored dates): the three confirmed line
+artefacts scored 1.85-2.07x the frame median (one only after its adjacent artefact was
+flagged) and one decorrelated 0.48; real Alaska ionosphere scored up to 1.37x; winter
+decorrelation on clean dates reached 0.35. A permanent decorrelated area (ocean) raises
+every date's line score (034_A_019: ~200-280), so the relative test keeps such frames
+unflagged but blind; blanking low-coherence pixels was tried and removes the artefacts'
+signal too. Two adjacent dates with an identical step cannot be told apart from a step
+on the dates around them.
 """
 
 from __future__ import annotations
@@ -249,9 +256,12 @@ def prescreen_dates(
 ) -> tuple[list[dict], list[EpochFlag]]:
     """Score every date with a reference pair and return (scores, flags).
 
-    Interior dates use the triplet (t-1, t, t+1); the newest date uses the two most
-    recent unflagged dates (a, b, t); the oldest date has no reference pair and is not
-    scored. Each pair is formed once; `reference` in each score names the pair (a, b).
+    Interior dates are first scored with the triplet (t-1, t, t+1), which with the
+    newest date's (t-2, t-1, t) sets the frame median; after any flag, unflagged dates
+    are re-scored against their nearest unflagged neighbours (a, t, b), and the newest
+    date against the two most recent unflagged dates (a, b, t). The oldest date has no
+    reference pair and is not scored.
+    Each pair is formed once; `reference` in each score names the pair (a, b).
     """
     dates = sorted(gslc_by_date)
     cache: dict[tuple[str, str], PairMaps] = {}
@@ -303,26 +313,60 @@ def prescreen_dates(
             )
         return out
 
-    scores, flags = [], []
+    def neighbours(k: int, bad: set[str]) -> tuple[str, str, str] | None:
+        """(mode, a, b) for date k skipping flagged dates; None if it is unscorable."""
+        before = [d for d in dates[:k] if d not in bad]
+        after = [d for d in dates[k + 1 :] if d not in bad]
+        if k == len(dates) - 1:
+            return ("newest", before[-2], before[-1]) if len(before) >= 2 else None
+        # an interior date with no unflagged date on one side keeps its last score
+        return ("interior", before[-1], after[0]) if before and after else None
+
+    def score_at(k: int, spec: tuple[str, str, str]) -> dict:
+        mode, a, b = spec
+        t = dates[k]
+        if mode == "newest":
+            return score(t, mode, f"{a}_{b}", [pair(b, t), pair(a, t), pair(a, b)], 1.0)
+        return score(t, mode, f"{a}_{b}", [pair(a, t), pair(t, b), pair(a, b)], -1.0)
+
+    by_date: dict[str, dict] = {}
+    used: dict[str, tuple[str, str, str]] = {}
+    flags: list[EpochFlag] = []
     try:
         for k in range(1, len(dates) - 1):
-            a, t, b = dates[k - 1], dates[k], dates[k + 1]
-            maps = [pair(a, t), pair(t, b), pair(a, b)]
-            scores.append(score(t, "interior", f"{a}_{b}", maps, -1.0))
-        lines = [s["line_score"] for s in scores]
-        median = float(np.median(lines)) if len(lines) >= 3 else 0.0
-        for s in scores:
-            flags += flag(s, median)
+            used[dates[k]] = ("interior", dates[k - 1], dates[k + 1])
+            by_date[dates[k]] = score_at(k, used[dates[k]])
+        lines = [s["line_score"] for s in by_date.values()]
         if len(dates) >= 3:
-            t = dates[-1]
+            # the newest date's plain triplet joins the median only (more dates make it
+            # robust when bad dates are many); it is flagged from its re-score below
+            k = len(dates) - 1
+            lines.append(
+                score_at(k, ("newest", dates[k - 2], dates[k - 1]))["line_score"]
+            )
+        median = float(np.median(lines)) if len(lines) >= 3 else 0.0
+        for s in by_date.values():
+            flags += flag(s, median)
+        # Re-score unflagged dates against their nearest unflagged neighbours until no
+        # new flag appears, so adjacent bad dates cannot hide each other; the newest
+        # date is first scored here.
+        changed = True
+        while changed:
+            changed = False
             bad = {f.epoch for f in flags}
-            prior = [d for d in dates[:-1] if d not in bad][-2:]
-            if len(prior) == 2:
-                a, b = prior
-                maps = [pair(b, t), pair(a, t), pair(a, b)]
-                s = score(t, "newest", f"{a}_{b}", maps, 1.0)
-                scores.append(s)
-                flags += flag(s, median)
+            for k in range(1, len(dates)):
+                t = dates[k]
+                spec = neighbours(k, bad)
+                if t in bad or spec is None or used.get(t) == spec:
+                    continue
+                used[t] = spec
+                by_date[t] = score_at(k, spec)
+                new = flag(by_date[t], median)
+                if new:
+                    flags += new
+                    changed = True
+                    break
+        scores = [by_date[d] for d in dates if d in by_date]
     finally:
         if executor is not None:
             executor.shutdown()

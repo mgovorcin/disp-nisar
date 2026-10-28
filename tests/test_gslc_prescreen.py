@@ -32,7 +32,8 @@ def _stack(
     """Build a synthetic stack, optionally with one bad date.
 
     Each band has coherent speckle (independent between bands) plus small noise.
-    `line_date` adds 0.6 rad to band A only on one side of a tilted straight line;
+    `line_date` (a date, or a tuple of dates each with its own line position) adds
+    0.6 rad to band A only on one side of a tilted straight line;
     `decorrelated_date` replaces half of the frame with new speckle in both bands;
     `every_date_line` gives each date its own line at a different offset (frame-wide
     ionosphere rather than a one-date artefact).
@@ -53,8 +54,10 @@ def _stack(
         if every_date_line:
             off = 600.0 + 300.0 * DATES.index(d)
             za = za * np.exp(1j * 0.6 * ((ya - 0.2 * xa) > off))
-        if d == line_date:
-            za = za * np.exp(1j * 0.6 * ((ya - 0.2 * xa) > 1200.0))
+        lines = line_date if isinstance(line_date, tuple) else (line_date,)
+        if d in lines:  # several bad dates: same angle, different positions
+            off = 1200.0 if len(lines) == 1 else 800.0 + 800.0 * lines.index(d)
+            za = za * np.exp(1j * 0.6 * ((ya - 0.2 * xa) > off))
         if d == decorrelated_date:
             za = np.where(ya > 1280.0, cplx(sa.shape), za)
             zb = np.where(yb > 1280.0, cplx(sb.shape), zb)
@@ -125,3 +128,9 @@ def test_workflow_prescreen_skips_compressed_and_writes_report(tmp_path):
     report = json.loads(out.read_text())
     assert report["flags"][0]["epoch"] == DATES[2]
     assert {s["epoch"] for s in report["scores"]} == set(DATES[1:])
+
+
+def test_adjacent_line_artefacts_are_both_flagged(tmp_path):
+    bad = (DATES[2], DATES[3])
+    scores, flags = prescreen_dates(_stack(tmp_path, line_date=bad), looks_y=8)
+    assert sorted((f.epoch, f.reason) for f in flags) == [(d, "gslc_line") for d in bad]
