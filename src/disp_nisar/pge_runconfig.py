@@ -346,6 +346,15 @@ class AlgorithmParameters(YamlModel):
             " directory; no date is dropped. Used with split-spectrum ionosphere."
         ),
     )
+    gslc_prescreen_drop_line_flags: bool = Field(
+        False,
+        description=(
+            "With `gslc_prescreen`, drop dates flagged as line artefacts from both"
+            " bands' input lists before phase linking. Decorrelation flags stay report"
+            " only; in forward mode a flagged newest date is kept and logged as an"
+            " error."
+        ),
+    )
     gslc_prescreen_row_stride: int = Field(
         3,
         ge=1,

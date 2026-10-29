@@ -2,12 +2,14 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
 
+from disp_nisar.ionosphere.epoch_qc import EpochFlag
 from disp_nisar.ionosphere.gslc_prescreen import prescreen_dates
-from disp_nisar.main import _prescreen_gslc_epochs
+from disp_nisar.main import _drop_flagged_epochs, _prescreen_gslc_epochs
 from disp_nisar.pge_runconfig import AlgorithmParameters
 
 ROWS, COLS_A, COLS_B = 512, 512, 64  # A at 5 m, B at 40 x 5 m: same ground footprint
@@ -134,3 +136,42 @@ def test_adjacent_line_artefacts_are_both_flagged(tmp_path):
     bad = (DATES[2], DATES[3])
     scores, flags = prescreen_dates(_stack(tmp_path, line_date=bad), looks_y=8)
     assert sorted((f.epoch, f.reason) for f in flags) == [(d, "gslc_line") for d in bad]
+
+
+def _lists(n_dates=5):
+    names = [f"NISAR_GSLC_{d}T000000_{d}T000010.h5" for d in DATES[:n_dates]]
+    files = [Path("compressed_20251201T000000_20251201T000010.h5")]
+    files += [Path(n) for n in names]
+    cfg = SimpleNamespace(cslc_file_list=list(files))
+    pge = SimpleNamespace(input_file_group=SimpleNamespace(gslc_file_list=list(files)))
+    return cfg, pge
+
+
+def _names(files):
+    return [f.name[11:19] for f in files if "compressed" not in f.name]
+
+
+def test_drop_removes_line_flags_from_both_bands_only():
+    cfg, pge = _lists()
+    flags = [
+        EpochFlag(DATES[2], "gslc_line", 20.0, np.nan),
+        EpochFlag(DATES[3], "gslc_decorrelated", 0.5, np.nan),
+    ]
+    assert _drop_flagged_epochs(cfg, pge, flags) == [DATES[2]]
+    kept = [d for d in DATES if d != DATES[2]]
+    assert _names(cfg.cslc_file_list) == kept
+    assert _names(pge.input_file_group.gslc_file_list) == kept
+    assert "compressed" in cfg.cslc_file_list[0].name
+
+
+def test_drop_keeps_newest_in_forward_mode_and_short_stacks():
+    cfg, pge = _lists()
+    newest = [EpochFlag(DATES[-1], "gslc_line", 20.0, np.nan)]
+    assert _drop_flagged_epochs(cfg, pge, newest, keep_newest=True) == []
+    assert _names(cfg.cslc_file_list) == DATES
+    cfg, pge = _lists(n_dates=3)
+    assert (
+        _drop_flagged_epochs(cfg, pge, [EpochFlag(DATES[1], "gslc_line", 20.0, np.nan)])
+        == []
+    )
+    assert _names(cfg.cslc_file_list) == DATES[:3]
