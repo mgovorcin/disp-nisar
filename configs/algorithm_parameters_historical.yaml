@@ -376,6 +376,8 @@ num_parallel_products: 4
 # Read from the MAIN algorithm file, not the frequency-B algorithm file.
 # The runconfig points here through dynamic_ancillary_file_group.algorithm_parameters_file.
 ionosphere_options:
+  # main_side: split-spectrum workflow on separately unwrapped A and B.
+  # main_diff: unwrap A and A*conj(B); the settings below apply to this method.
   method: main_side
   smooth_sigma_m: 400.0  # Fallback if filtering.sigma_m is null.
   mask_erosion_px: 3    # Fallback if filtering.donor_erosion_px is null.
