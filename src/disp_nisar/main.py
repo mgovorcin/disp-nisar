@@ -616,29 +616,23 @@ def create_products(
         logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
         water_gslc_mask_warped = None
 
-    if pge_runconfig.dynamic_ancillary_file_group.mask_file:
-        # Combine masks: water + GSLC + nodata
-        matching_water_binary_mask = None
-
-        if (
-            pge_runconfig.dynamic_ancillary_file_group.mask_file
-            and water_gslc_mask_warped is not None
-        ):
-            matching_water_binary_mask = water_gslc_mask_warped
-
-            create_combined_mask(
-                mask_filename=matching_water_binary_mask,
-                image_filename=out_paths.timeseries_paths[0],
-                output_filename=combined_mask_file,
-            )
-        else:
-            matching_water_binary_mask = None
-
-            # A validity mask is still required without an ancillary water mask.
-            _create_nodata_mask(
-                filename=out_paths.timeseries_paths[0],
-                output_filename=combined_mask_file,
-            )
+    # Combine masks: water + GSLC + nodata. A validity mask is required even
+    # without an ancillary water mask, since conncomp regrowth reads it.
+    if (
+        pge_runconfig.dynamic_ancillary_file_group.mask_file
+        and water_gslc_mask_warped is not None
+    ):
+        matching_water_binary_mask = water_gslc_mask_warped
+        create_combined_mask(
+            mask_filename=matching_water_binary_mask,
+            image_filename=out_paths.timeseries_paths[0],
+            output_filename=combined_mask_file,
+        )
+    else:
+        _create_nodata_mask(
+            filename=out_paths.timeseries_paths[0],
+            output_filename=combined_mask_file,
+        )
 
     ## TODO: remove stitched from naming in run_displacement
     # Check and update correlation paths
@@ -666,29 +660,6 @@ def create_products(
         if method in ("snaphu", "phass", "whirlwind"):
             row_looks, col_looks = cfg.phase_linking.half_window.to_looks()
             nlooks = row_looks * col_looks
-
-            # Build the required mask immediately before conncomp regrowth.
-            combined_mask_file = cfg.work_directory / "combined_water_nodata_mask.tif"
-
-            if (
-                pge_runconfig.dynamic_ancillary_file_group.mask_file
-                and water_gslc_mask_warped is not None
-            ):
-                create_combined_mask(
-                    mask_filename=water_gslc_mask_warped,
-                    image_filename=out_paths.timeseries_paths[0],
-                    output_filename=combined_mask_file,
-                )
-            else:
-                _create_nodata_mask(
-                    filename=out_paths.timeseries_paths[0],
-                    output_filename=combined_mask_file,
-                )
-
-            if not combined_mask_file.is_file():
-                raise FileNotFoundError(
-                    f"Mask creation returned without creating: {combined_mask_file}"
-                )
 
             out_paths.conncomp_paths = _update_snaphu_conncomps(
                 timeseries_paths=timeseries_rad_paths,

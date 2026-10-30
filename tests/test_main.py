@@ -2,7 +2,9 @@ from contextlib import chdir
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from dolphin import io
 
 from disp_nisar import main
 from disp_nisar.cli.run import run_main
@@ -78,3 +80,15 @@ def test_main_diff_rejects_unsupported_runs(kwargs, message):
     cfg, pge_runconfig = _main_diff_inputs(**kwargs)
     with pytest.raises(ValueError, match=message):
         main._get_main_diff_options(cfg, pge_runconfig)
+
+
+def test_nodata_mask_keeps_valid_zeros(tmp_path):
+    """The reference pixel of a displacement raster is a valid zero."""
+    image = tmp_path / "20260101_20260113.tif"
+    data = np.array([[0.0, 1.0], [np.nan, -2.0]], dtype=np.float32)
+    io.write_arr(arr=data, output_name=image, nodata=np.nan)
+
+    output = tmp_path / "mask.tif"
+    main._create_nodata_mask(image, output)
+
+    np.testing.assert_array_equal(io.load_gdal(output), [[1, 1], [0, 1]])
