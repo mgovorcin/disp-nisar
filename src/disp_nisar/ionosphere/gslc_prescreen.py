@@ -24,7 +24,7 @@ against their nearest unflagged neighbours, so a bad neighbour neither leaks int
 clean date nor hides an adjacent artefact (re-scoring can need pairs more than three
 dates apart).
 
-Thresholds (2026-10-28, seven ab36 frames, 34 scored dates): the three confirmed line
+Thresholds (2026-10-28, seven ab36 frames, 33 scored dates): the three confirmed line
 artefacts scored 1.85-2.07x the frame median (one only after its adjacent artefact was
 flagged) and one decorrelated 0.48; real Alaska ionosphere scored up to 1.37x; winter
 decorrelation on clean dates reached 0.35. A permanent decorrelated area (ocean) raises
