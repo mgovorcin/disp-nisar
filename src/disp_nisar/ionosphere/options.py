@@ -164,6 +164,22 @@ class IonosphereOptions(YamlModel):
             " settings"
         ),
     )
+    d_looks: int = Field(
+        10,
+        ge=1,
+        le=64,
+        description=(
+            "Unwrap the A*conj(B) phase on a grid this many times coarser than the B"
+            " grid, then upsample. Guards against gross cycle errors at a small cost"
+            " where native unwrapping does not fail. 1 unwraps it natively"
+        ),
+    )
+    d_looks_min_fraction: float = Field(
+        0.1,
+        gt=0,
+        le=1,
+        description="Smallest donor fraction of a coarse block that counts as data",
+    )
     resume: bool = Field(
         True, description="Reuse completed stages in the output folder"
     )

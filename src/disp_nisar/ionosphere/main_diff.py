@@ -38,6 +38,7 @@ from ._main_diff_io import (
     atomic_json,
     read_window,
 )
+from .dlooks import unwrap_d_coarse
 from .gslc_mask import prepare_gslc_mask_cache
 from .inversion import build_design_matrix, invert_common_phase_block
 from .ionosphere_filter import (
@@ -494,19 +495,22 @@ def _unwrap_pair(
         work = folder / f"_unwrap_{band}"
         work.mkdir(exist_ok=True)
 
-        unw, _ = unwrap(
-            ifg_filename=prepared[f"{band}_ifg"],
-            corr_filename=prepared[f"{band}_cor"],
-            unw_filename=work / f"{band}.unw.tif",
-            nlooks=options.nlooks,
-            mask_filename=prepared["inside"],
-            similarity_filename=prepared[f"{band}_sim"],
-            unwrap_options=cfg,
-            unw_nodata=np.nan,
-            ccl_nodata=0,
-            scratchdir=work / "scratch",
-            delete_scratch=not options.keep_intermediates,
-        )
+        if band == "D" and options.d_looks > 1:
+            unw = unwrap_d_coarse(prepared, work, cfg, options, unwrap)
+        else:
+            unw, _ = unwrap(
+                ifg_filename=prepared[f"{band}_ifg"],
+                corr_filename=prepared[f"{band}_cor"],
+                unw_filename=work / f"{band}.unw.tif",
+                nlooks=options.nlooks,
+                mask_filename=prepared["inside"],
+                similarity_filename=prepared[f"{band}_sim"],
+                unwrap_options=cfg,
+                unw_nodata=np.nan,
+                ccl_nodata=0,
+                scratchdir=work / "scratch",
+                delete_scratch=not options.keep_intermediates,
+            )
 
         Path(unw).replace(unw_path)
         result[f"{band}_unw"] = unw_path

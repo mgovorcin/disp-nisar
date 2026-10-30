@@ -221,6 +221,31 @@ def test_correction_returns_the_known_ionosphere(stack, unwrap_calls, product):
     np.testing.assert_allclose(correction[interior], expected[interior], atol=1e-3)
 
 
+def test_native_d_gives_the_same_correction_on_a_smooth_ionosphere(stack, unwrap_calls):
+    coarse = run_main_diff_estimation(**stack, options=_options(d_looks=10))
+    expected = _read(coarse[0])
+    assert any("D_coarse_ifg" in str(call) for call in unwrap_calls)
+    unwrap_calls.clear()
+
+    native = run_main_diff_estimation(
+        **stack, options=_options(d_looks=1, resume=False)
+    )
+
+    assert not any("D_coarse_ifg" in str(call) for call in unwrap_calls)
+    interior = (slice(25, -25), slice(25, -25))
+    np.testing.assert_allclose(
+        _read(native[0])[interior], expected[interior], atol=1e-3
+    )
+
+
+def test_changing_d_looks_stops_a_resume(stack, unwrap_calls):
+    run_main_diff_estimation(**stack, options=_options(d_looks=10))
+    count = len(unwrap_calls)
+    with pytest.raises(ValueError, match="used different"):
+        run_main_diff_estimation(**stack, options=_options(d_looks=4))
+    assert len(unwrap_calls) == count
+
+
 def test_resume_reuses_finished_work(stack, unwrap_calls):
     first = run_main_diff_estimation(**stack, options=_options())
     before = _read(first[0])

@@ -1,6 +1,8 @@
 {
   "block_size": 256,
   "correlation_threshold": 0.2,
+  "d_looks": 10,
+  "d_looks_min_fraction": 0.1,
   "filtering": {
     "donor_erosion_px": null,
     "filling_method": "nearest",
