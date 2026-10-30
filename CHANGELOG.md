@@ -12,6 +12,9 @@
 - `main_diff` unwraps A*conj(B) on a grid `ionosphere_options.d_looks` times coarser
   than the B grid (default 10), which stops most gross cycle errors. Set it to 1 for
   native unwrapping.
+- `filtering.method: robust` smooths the `main_diff` screen with background clipping,
+  empirical noise weights, a support floor and an 8 km near-range exclusion. The
+  default filter is unchanged.
 
 **Fixed**
 

@@ -488,6 +488,11 @@ def _run_main_diff_workflow(
         out_dir=cfg.work_directory / "ionosphere_main_diff",
         unwrap_options=cfg_b.unwrap_options,
         options=options,
+        incidence_file=(
+            Path(cfg.correction_options.geometry_files[0])
+            if cfg.correction_options.geometry_files
+            else None
+        ),
     )
     _prune_block_dirs(cfg_b.work_directory)
     return result

@@ -13,6 +13,13 @@
     "outlier_min_scale_rad": 0.1,
     "outlier_threshold": 3.5,
     "restore_mask": false,
+    "robust_clip_block_m": 10000.0,
+    "robust_clip_cycles": 0.2,
+    "robust_exclude_noise_factor": 3.0,
+    "robust_fallback_sigma_m": 10000.0,
+    "robust_min_support": 0.2,
+    "robust_near_range_exclude_km": 8.0,
+    "robust_noise_weights": true,
     "sigma_m": null,
     "truncate": 4.0
   },

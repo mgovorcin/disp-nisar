@@ -15,6 +15,7 @@ from affine import Affine
 from dolphin.workflows.config import UnwrapOptions
 from rasterio.crs import CRS
 
+from disp_nisar.ionosphere.ionosphere_filter import apply_ionosphere_filter
 from disp_nisar.ionosphere.main_diff import (
     BandInputs,
     estimate_iono_main_diff,
@@ -244,6 +245,111 @@ def test_changing_d_looks_stops_a_resume(stack, unwrap_calls):
     with pytest.raises(ValueError, match="used different"):
         run_main_diff_estimation(**stack, options=_options(d_looks=4))
     assert len(unwrap_calls) == count
+
+
+def _robust_options(**kwargs):
+    return _options(
+        filtering=IonosphereFilterOptions(
+            method="robust",
+            sigma_m=(120.0, 120.0),
+            robust_fallback_sigma_m=500.0,
+            robust_clip_block_m=500.0,
+            **kwargs,
+        )
+    )
+
+
+def _write_incidence(tmp_path):
+    x, _ = _xy(SHAPE_B, TRANSFORM_B)
+    return _write(
+        tmp_path / "incidence.tif", (33.0 + x / 400.0).astype("f4"), TRANSFORM_B
+    )
+
+
+def test_robust_filter_returns_the_known_ionosphere(stack, unwrap_calls, tmp_path):
+    outputs = run_main_diff_estimation(
+        **stack,
+        options=_robust_options(robust_near_range_exclude_km=0.4),
+        incidence_file=_write_incidence(tmp_path),
+    )
+
+    assert len(unwrap_calls) == 2 * len(PAIRS)
+    correction = _read(outputs[1])
+    x, y = _xy(SHAPE_A, TRANSFORM_A)
+    iono = _iono(2, x, y)
+    expected = -freq_to_wavelength(F_A) / (4 * np.pi) * (iono - iono[REFERENCE_A])
+    interior = (slice(35, -35), slice(35, -35))
+    np.testing.assert_allclose(correction[interior], expected[interior], atol=1e-3)
+    band = _read(stack["out_dir"] / "timeseries" / "near_range_band.tif")
+    # 400 m is 10 pixels from the near edge, away from the frame's corners
+    assert band[45, :10].all()
+    assert not band[45, 12:].any()
+
+
+def test_robust_filter_runs_without_an_incidence_layer(stack, unwrap_calls):
+    assert not unwrap_calls
+    outputs = run_main_diff_estimation(**stack, options=_robust_options())
+    assert not (stack["out_dir"] / "timeseries" / "near_range_band.tif").exists()
+    assert np.isfinite(_read(outputs[0])).any()
+
+
+def test_robust_filter_weights_equally_with_too_few_epochs(stack, unwrap_calls):
+    assert not unwrap_calls
+    run_main_diff_estimation(**stack, options=_robust_options())
+    noise = stack["out_dir"] / "timeseries" / "ionosphere_noise.rad.tif"
+    assert np.isnan(_read(noise)).all()
+
+
+def test_noise_weights_can_be_turned_off(stack, unwrap_calls):
+    assert not unwrap_calls
+    run_main_diff_estimation(
+        **stack, options=_robust_options(robust_noise_weights=False)
+    )
+    assert not (stack["out_dir"] / "timeseries" / "ionosphere_noise.rad.tif").exists()
+
+
+def test_robust_layers_reach_the_filter(stack, unwrap_calls, tmp_path, monkeypatch):
+    seen = []
+
+    def recording_filter(phase, **kwargs):
+        seen.append(kwargs)
+        return apply_ionosphere_filter(phase, **kwargs)
+
+    monkeypatch.setattr(
+        "disp_nisar.ionosphere.main_diff.apply_ionosphere_filter", recording_filter
+    )
+    run_main_diff_estimation(
+        **stack,
+        options=_robust_options(robust_near_range_exclude_km=0.4),
+        incidence_file=_write_incidence(tmp_path),
+    )
+
+    assert len(unwrap_calls) == 2 * len(PAIRS)
+    assert len(seen) == 2
+    assert seen[0]["noise"].shape == SHAPE_B
+    assert seen[0]["exclude_mask"].dtype == bool
+    assert seen[0]["exclude_mask"][45, :10].all()
+
+
+def test_retuning_robust_settings_rebuilds_its_layers(stack, unwrap_calls, tmp_path):
+    incidence = _write_incidence(tmp_path)
+    run_main_diff_estimation(
+        **stack,
+        options=_robust_options(robust_near_range_exclude_km=0.4),
+        incidence_file=incidence,
+    )
+    count = len(unwrap_calls)
+    band_path = stack["out_dir"] / "timeseries" / "near_range_band.tif"
+    narrow = np.count_nonzero(_read(band_path))
+
+    run_main_diff_estimation(
+        **stack,
+        options=_robust_options(robust_near_range_exclude_km=1.2),
+        incidence_file=incidence,
+    )
+
+    assert len(unwrap_calls) == count
+    assert np.count_nonzero(_read(band_path)) > narrow
 
 
 def test_resume_reuses_finished_work(stack, unwrap_calls):

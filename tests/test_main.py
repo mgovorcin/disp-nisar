@@ -171,7 +171,12 @@ def main_diff_run(monkeypatch):
     return seen
 
 
-def _run_workflow(seen, gslcs=("g_20260101.h5", "g_20260113.h5"), products=None):
+def _run_workflow(
+    seen,
+    gslcs=("g_20260101.h5", "g_20260113.h5"),
+    products=None,
+    geometry_files=("incidence.tif", "los_east.tif", "los_north.tif"),
+):
     cfg = SimpleNamespace(
         cslc_file_list=[Path(g) for g in gslcs],
         output_options=SimpleNamespace(
@@ -179,6 +184,7 @@ def _run_workflow(seen, gslcs=("g_20260101.h5", "g_20260113.h5"), products=None)
         ),
         mask_file="prepared_mask.tif",
         work_directory=Path("scratch"),
+        correction_options=SimpleNamespace(geometry_files=geometry_files),
     )
     pge_runconfig = SimpleNamespace(to_workflow=lambda **_kwargs: seen.cfg_b)
     full_outputs = SimpleNamespace(
@@ -224,6 +230,16 @@ def test_main_diff_workflow_passes_both_bands_and_the_reference(main_diff_run):
         "20260101",
         "20260113",
     ]
+
+
+def test_main_diff_workflow_passes_the_incidence_layer(main_diff_run):
+    _run_workflow(main_diff_run)
+    assert main_diff_run.estimation["incidence_file"] == Path("incidence.tif")
+
+
+def test_main_diff_workflow_runs_without_geometry(main_diff_run):
+    _run_workflow(main_diff_run, geometry_files=())
+    assert main_diff_run.estimation["incidence_file"] is None
 
 
 def test_main_diff_workflow_without_products_does_nothing(main_diff_run):

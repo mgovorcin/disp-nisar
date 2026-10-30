@@ -31,6 +31,7 @@ from dolphin.utils import format_date_pair
 from dolphin.workflows.config import UnwrapOptions
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
+from rasterio.warp import reproject
 from rasterio.windows import Window
 
 from ._main_diff_io import (
@@ -980,6 +981,7 @@ def run_main_diff_estimation(
     out_dir: Path,
     unwrap_options: UnwrapOptions,
     options: IonosphereOptions,
+    incidence_file: Path | None = None,
 ) -> list[Path]:
     """Run A/(A-B) ionosphere processing under an output lock.
 
@@ -1002,6 +1004,8 @@ def run_main_diff_estimation(
         Base SNAPHU or Whirlwind configuration.
     options : IonosphereOptions
         Estimation, quality, memory, resume, and retention settings.
+    incidence_file : Path, optional
+        Incidence-angle raster. The robust filter needs it to find near range.
 
     Returns
     -------
@@ -1041,6 +1045,7 @@ def run_main_diff_estimation(
             out_dir,
             unwrap_options,
             options,
+            incidence_file,
         )
 
 
@@ -1138,6 +1143,141 @@ def _filter_cache_matches(
         return False
 
 
+def _needs_filtering(raw: Path, final: Path, options: IonosphereOptions) -> bool:
+    """Tell whether neither the correction nor the filled raster can be reused."""
+    filled = raw.with_name(
+        raw.name.replace("_iono_B.rad.tif", "_iono_B_filled.rad.tif")
+    )
+    return not _filter_cache_matches(final, raw, options) and not _filter_cache_matches(
+        filled, raw, options
+    )
+
+
+def _write_filter_layer(
+    path: Path,
+    array: np.ndarray,
+    grid: Grid,
+    nodata: float | None,
+    signature: str,
+) -> None:
+    """Publish a stack-wide input of the filter, tagged with its filter signature."""
+    temporary = path.with_name(f"{path.stem}.partial.tif")
+    io.write_arr(
+        arr=array,
+        output_name=temporary,
+        geotransform=grid.transform.to_gdal(),
+        projection=grid.crs.to_wkt(),
+        dtype=array.dtype,
+        nbands=1,
+        nodata=nodata,
+        options=WORKING_TIFF_OPTIONS,
+    )
+    with rasterio.open(temporary, "r+") as dst:
+        dst.update_tags(ionosphere_filter_signature=signature)
+    temporary.replace(path)
+
+
+def _prepare_robust_layers(
+    raw_paths: Sequence[Path],
+    grid: Grid,
+    folder: Path,
+    incidence_file: Path | None,
+    pixel_m: float,
+    options: IonosphereOptions,
+) -> dict[str, Path]:
+    """Build what the robust filter needs from the whole stack.
+
+    Parameters
+    ----------
+    raw_paths : Sequence[Path]
+        Inverted ionosphere rasters on the B grid.
+    grid : Grid
+        The B grid.
+    folder : Path
+        Directory for the layers.
+    incidence_file : Path or None
+        Incidence-angle raster that locates the near-range band.
+    pixel_m : float
+        B-grid column spacing, in meters.
+    options : IonosphereOptions
+        Filter settings.
+
+    Returns
+    -------
+    dict[str, Path]
+        The noise and near_range rasters. A layer that cannot be built is absent,
+        and the filter runs without it.
+
+    """
+    from .smoothing import empirical_noise, near_range_band
+
+    settings = options.filtering
+    signature = filter_cache_signature(raw_paths[0], options)
+    layers = {}
+
+    def epochs():
+        for path in raw_paths:
+            with rasterio.open(path) as ds:
+                yield ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+
+    footprint = np.zeros((grid.height, grid.width), dtype=bool)
+    near_range_path = folder / "near_range_band.tif"
+    noise_path = folder / "ionosphere_noise.rad.tif"
+    km = settings.robust_near_range_exclude_km
+    need_band = km > 0 and not _filter_cache_matches(
+        near_range_path, raw_paths[0], options
+    )
+    need_noise = settings.robust_noise_weights and not _filter_cache_matches(
+        noise_path, raw_paths[0], options
+    )
+    if need_band or need_noise:
+        for epoch in epochs():
+            footprint |= np.isfinite(epoch)
+
+    if km > 0 and incidence_file is None:
+        logger.warning("No incidence layer: the near-range band is not excluded")
+    elif km > 0:
+        if need_band:
+            incidence = np.full(footprint.shape, np.nan, np.float32)
+            with rasterio.open(incidence_file) as src:
+                reproject(
+                    src.read(1).astype(np.float32),
+                    incidence,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    src_nodata=src.nodata,
+                    dst_transform=grid.transform,
+                    dst_crs=grid.crs,
+                    dst_nodata=np.nan,
+                    resampling=Resampling.average,
+                )
+            band = near_range_band(footprint, incidence, pixel_m, km)
+            logger.info(
+                "Near-range band of %.1f km covers %.1f %% of the footprint",
+                km,
+                100 * np.count_nonzero(band) / max(np.count_nonzero(footprint), 1),
+            )
+            _write_filter_layer(
+                near_range_path, band.astype(np.uint8), grid, None, signature
+            )
+        layers["near_range"] = near_range_path
+
+    if settings.robust_noise_weights:
+        if need_noise:
+            noise = empirical_noise(
+                epochs(), footprint, settings.robust_fallback_sigma_m / pixel_m
+            )
+            _write_filter_layer(noise_path, noise, grid, np.nan, signature)
+            if not np.isfinite(noise).any():
+                logger.warning(
+                    "Too few output epochs for empirical noise: %d. Pixels are"
+                    " weighted equally",
+                    len(raw_paths),
+                )
+        layers["noise"] = noise_path
+    return layers
+
+
 def _run_locked(
     band_a: BandInputs,
     band_b: BandInputs,
@@ -1149,6 +1289,7 @@ def _run_locked(
     out_dir: Path,
     unwrap_options: UnwrapOptions,
     options: IonosphereOptions,
+    incidence_file: Path | None,
 ) -> list[Path]:
     """Process a matching A/B network while the caller holds the lock.
 
@@ -1170,6 +1311,8 @@ def _run_locked(
         Base configuration for pair unwrapping.
     options : IonosphereOptions
         Method, quality thresholds, memory limits, and restart settings.
+    incidence_file : Path or None
+        Incidence-angle raster used by the robust filter.
 
     Returns
     -------
@@ -1251,14 +1394,7 @@ def _run_locked(
     ]
     inversion_ready = options.resume and all(p.is_file() for p in raw_paths)
     need_masks = not inversion_ready or any(
-        not _filter_cache_matches(final, raw, options)
-        and not _filter_cache_matches(
-            raw.with_name(
-                raw.name.replace("_iono_B.rad.tif", "_iono_B_filled.rad.tif")
-            ),
-            raw,
-            options,
-        )
+        _needs_filtering(raw, final, options)
         for raw, final in zip(raw_paths, final_paths, strict=True)
     )
     cached_masks = (
@@ -1385,6 +1521,15 @@ def _run_locked(
         for source, destination in zip(temporary, intermediate, strict=True):
             source.replace(destination)
 
+    robust_layers: dict[str, Path] = {}
+    if options.filtering.method == "robust" and any(
+        _needs_filtering(raw, final, options)
+        for raw, final in zip(intermediate, final_paths, strict=True)
+    ):
+        robust_layers = _prepare_robust_layers(
+            intermediate, target, timeseries_dir, incidence_file, dx_m, options
+        )
+
     outputs = []
     for i, (src, match, name) in enumerate(
         zip(intermediate, products, names, strict=True)
@@ -1434,6 +1579,16 @@ def _run_locked(
                 footprint=footprint,
                 pixel_size_m=(dy_m, dx_m),
                 options=options,
+                noise=(
+                    io.load_gdal(robust_layers["noise"], masked=True).filled(np.nan)
+                    if "noise" in robust_layers
+                    else None
+                ),
+                exclude_mask=(
+                    io.load_gdal(robust_layers["near_range"]) == 1
+                    if "near_range" in robust_layers
+                    else None
+                ),
             )
             logger.info(
                 "%s: ionosphere valid before=%d, after=%d",

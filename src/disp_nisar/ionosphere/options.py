@@ -15,14 +15,14 @@ class IonosphereFilterOptions(YamlModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    method: Literal["guided", "smooth_iono"] = Field(
+    method: Literal["guided", "smooth_iono", "robust"] = Field(
         "guided", description="Filter applied to the ionospheric phase"
     )
     sigma_m: tuple[float, float] | None = Field(
         None,
         description=(
             "Gaussian standard deviations (row, column) in meters. If None, uses"
-            " smooth_sigma_m"
+            " smooth_sigma_m, or 2 km for the robust method"
         ),
     )
     kernel_size_px: tuple[int, int] | None = Field(
@@ -64,6 +64,51 @@ class IonosphereFilterOptions(YamlModel):
     )
     restore_mask: bool = Field(
         False, description="Set pixels outside the donors back to NaN after filtering"
+    )
+
+    robust_min_support: float = Field(
+        0.2,
+        gt=0,
+        le=1,
+        description=(
+            "Robust method: kernel support below which the coarse kernel is used"
+        ),
+    )
+    robust_fallback_sigma_m: float = Field(
+        10000.0, gt=0, description="Robust method: coarse kernel width, in meters"
+    )
+    robust_noise_weights: bool = Field(
+        True,
+        description="Robust method: weight pixels by their empirical noise over epochs",
+    )
+    robust_exclude_noise_factor: float | None = Field(
+        3.0,
+        gt=0,
+        description=(
+            "Robust method: exclude pixels noisier than this times the median. If None,"
+            " noisy pixels are only down-weighted"
+        ),
+    )
+    robust_near_range_exclude_km: float = Field(
+        8.0,
+        ge=0,
+        description=(
+            "Robust method: width of the near-range band left out of the screen and"
+            " filled from the interior. Needs the incidence-angle layer. 0 disables it"
+        ),
+    )
+    robust_clip_cycles: float | None = Field(
+        0.2,
+        gt=0,
+        description=(
+            "Robust method: drop pixels this many cycles from the coarse background."
+            " If None, disables clipping"
+        ),
+    )
+    robust_clip_block_m: float = Field(
+        10000.0,
+        gt=0,
+        description="Robust method: block size of the coarse background, in meters",
     )
 
     @field_validator("sigma_m")

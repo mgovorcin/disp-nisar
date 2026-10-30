@@ -2,7 +2,8 @@
 
 The pipeline uses apply_ionosphere_filter() with validated algorithm-file
 options. Available methods are guided (guide/filter, fill, restore original
-observations, final filter) and smooth_iono (the existing smoother).
+observations, final filter), smooth_iono (the existing smoother), and robust
+(see smoothing.py).
 
 The guided method ports the sequence from ISCE3's IonosphereFilter.low_pass_filter.
 It uses SciPy, not the ISCE3 package, and does not claim bitwise equivalence.
@@ -257,14 +258,31 @@ def apply_ionosphere_filter(
     footprint: np.ndarray,
     pixel_size_m: tuple[float, float],
     options: IonosphereOptions,
+    noise: np.ndarray | None = None,
+    exclude_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Dispatch the configured method on an aligned unwrapped phase array.
 
     The main algorithm file owns these options. A null filtering.sigma_m
-    falls back to the existing smooth_sigma_m scalar; a null erosion pair
-    falls back to (0, mask_erosion_px). No coherence-to-sigma proxy is invented.
+    falls back to the existing smooth_sigma_m scalar, or to 2 km for the robust
+    method; a null erosion pair falls back to (0, mask_erosion_px). No
+    coherence-to-sigma proxy is invented. Only the robust method reads `noise`
+    and `exclude_mask`; it does not erode its donors.
     """
     settings = options.filtering
+    if settings.method == "robust":
+        from .smoothing import filter_ionosphere_robust
+
+        return filter_ionosphere_robust(
+            phase,
+            donor_mask=donor_mask,
+            footprint=footprint,
+            pixel_size_m=pixel_size_m,
+            settings=settings,
+            sigma_m=settings.sigma_m or (2000.0, 2000.0),
+            noise=noise,
+            exclude_mask=exclude_mask,
+        )
     sigma_m = settings.sigma_m or (options.smooth_sigma_m,) * 2
     erosion = (
         settings.donor_erosion_px
