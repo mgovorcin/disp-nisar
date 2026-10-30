@@ -123,3 +123,130 @@ def test_main_diff_correction_must_declare_meters(tmp_path):
     )
     with pytest.raises(ValueError, match="must declare meters"):
         main._ionosphere_to_meters(path, np.ones((1, 1)), 0.24)
+
+
+class _Workflow(SimpleNamespace):
+    """The parts of a frequency-B DisplacementWorkflow the main_diff path sets."""
+
+    def __init__(self, method="whirlwind"):
+        super().__init__(
+            output_options=SimpleNamespace(bounds=None, bounds_epsg=None, epsg=None),
+            unwrap_options=SimpleNamespace(unwrap_method=method, run_unwrap=True),
+            timeseries_options=SimpleNamespace(run_inversion=True, run_velocity=True),
+            mask_file="raw_water_distance.tif",
+            work_directory=Path("scratch_freqB"),
+        )
+
+
+@pytest.fixture
+def main_diff_run(monkeypatch):
+    """Stub the expensive stages, recording what the workflow hands them."""
+    seen = SimpleNamespace(cfg_b=_Workflow(), estimation=None, displacement=None)
+    outputs_b = SimpleNamespace(
+        stitched_ifg_paths=["b.int.tif"],
+        stitched_cor_paths=["b.cor.tif"],
+        stitched_similarity_file="b_sim.tif",
+    )
+
+    def run_displacement(cfg, debug, raise_on_empty):
+        seen.displacement = (cfg, debug, raise_on_empty)
+        return outputs_b
+
+    def estimation(**kwargs):
+        seen.estimation = kwargs
+        return ["correction.tif"]
+
+    monkeypatch.setattr(main, "run_displacement", run_displacement)
+    monkeypatch.setattr(main, "_prune_block_dirs", lambda _path: 0)
+    monkeypatch.setattr(
+        main, "read_reference_point", lambda _path: SimpleNamespace(row=7, col=9)
+    )
+    monkeypatch.setattr(
+        "disp_nisar.ionosphere.gslc.get_center_frequencies",
+        lambda _path: (1.2395e9, 1.2935e9),
+    )
+    monkeypatch.setattr(
+        "disp_nisar.ionosphere.main_diff.run_main_diff_estimation", estimation
+    )
+    return seen
+
+
+def _run_workflow(seen, gslcs=("g_20260101.h5", "g_20260113.h5"), products=None):
+    cfg = SimpleNamespace(
+        cslc_file_list=[Path(g) for g in gslcs],
+        output_options=SimpleNamespace(
+            bounds=(1, 2, 3, 4), bounds_epsg=4326, epsg=32611
+        ),
+        mask_file="prepared_mask.tif",
+        work_directory=Path("scratch"),
+    )
+    pge_runconfig = SimpleNamespace(to_workflow=lambda **_kwargs: seen.cfg_b)
+    full_outputs = SimpleNamespace(
+        stitched_ifg_paths=["a.int.tif"],
+        stitched_cor_paths=["a.cor.tif"],
+        stitched_similarity_file="a_sim.tif",
+    )
+    return main._run_main_diff_workflow(
+        cfg,
+        pge_runconfig,
+        full_outputs,
+        [Path("out/20260101_20260113.tif")] if products is None else products,
+        IonosphereOptions(method="main_diff"),
+        False,
+    )
+
+
+def test_main_diff_workflow_stops_frequency_b_at_stitched_ifgs(main_diff_run):
+    assert _run_workflow(main_diff_run) == ["correction.tif"]
+
+    cfg_b = main_diff_run.cfg_b
+    assert main_diff_run.displacement == (cfg_b, False, False)
+    assert cfg_b.unwrap_options.run_unwrap is False
+    assert cfg_b.timeseries_options.run_inversion is False
+    assert cfg_b.timeseries_options.run_velocity is False
+    # The prepared mask, since the raw ancillary is a water distance map
+    assert cfg_b.mask_file == "prepared_mask.tif"
+    assert cfg_b.output_options.bounds == (1, 2, 3, 4)
+    assert cfg_b.output_options.epsg == 32611
+
+
+def test_main_diff_workflow_passes_both_bands_and_the_reference(main_diff_run):
+    _run_workflow(main_diff_run)
+
+    kwargs = main_diff_run.estimation
+    assert kwargs["band_a"].interferograms == ["a.int.tif"]
+    assert kwargs["band_b"].interferograms == ["b.int.tif"]
+    assert kwargs["band_a"].similarity == "a_sim.tif"
+    assert kwargs["reference_a"] == (7, 9)
+    assert (kwargs["f_A"], kwargs["f_B"]) == (1.2395e9, 1.2935e9)
+    assert kwargs["out_dir"] == Path("scratch/ionosphere_main_diff")
+    assert [d.strftime("%Y%m%d") for d in kwargs["gslc_by_date"]] == [
+        "20260101",
+        "20260113",
+    ]
+
+
+def test_main_diff_workflow_without_products_does_nothing(main_diff_run):
+    assert _run_workflow(main_diff_run, products=[]) == []
+    assert main_diff_run.displacement is None
+
+
+def test_main_diff_workflow_rejects_other_unwrappers(main_diff_run):
+    main_diff_run.cfg_b = _Workflow(method="spurt")
+    with pytest.raises(ValueError, match="requires snaphu or whirlwind"):
+        _run_workflow(main_diff_run)
+
+
+def test_main_diff_workflow_rejects_duplicate_acquisitions(main_diff_run):
+    with pytest.raises(ValueError, match="Duplicate GSLC acquisition"):
+        _run_workflow(main_diff_run, gslcs=("g_20260101.h5", "h_20260101.h5"))
+
+
+def test_main_diff_workflow_rejects_changing_frequencies(main_diff_run, monkeypatch):
+    frequencies = iter([(1.2395e9, 1.2935e9), (1.2395e9, 1.2945e9)])
+    monkeypatch.setattr(
+        "disp_nisar.ionosphere.gslc.get_center_frequencies",
+        lambda _path: next(frequencies),
+    )
+    with pytest.raises(ValueError, match="change within the GSLC stack"):
+        _run_workflow(main_diff_run)

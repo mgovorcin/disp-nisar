@@ -85,6 +85,20 @@ def test_outlier_rejection_stops_a_spike_spreading(plane):
     assert np.abs(kept[60, 70] - plane[60, 70]) > 1.0
 
 
+def test_linear_fill_follows_a_plane_across_a_gap(plane):
+    """Nearest fill leaves a step inside a wide gap; linear fill does not."""
+    phase = plane.copy()
+    phase[40:80, 50:90] = np.nan
+    options = {"guide_filter_method": "none", "restore_mask": False}
+
+    linear = _filter(phase, _options(filling_method="linear", **options))
+    nearest = _filter(phase, _options(filling_method="nearest", **options))
+
+    gap = (slice(50, 70), slice(60, 80))
+    np.testing.assert_allclose(linear[gap], plane[gap], atol=1e-3)
+    assert np.abs(nearest[gap] - plane[gap]).max() > 0.05
+
+
 def test_filter_uses_the_scalar_fallbacks(plane):
     options = IonosphereOptions(smooth_sigma_m=80.0, mask_erosion_px=0)
     explicit = _filter(plane, _options())

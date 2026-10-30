@@ -317,6 +317,21 @@ def test_reference_outside_the_product_is_rejected(stack, unwrap_calls):
         run_main_diff_estimation(**stack, options=_options())
 
 
+def test_bands_must_stay_on_one_grid(stack, unwrap_calls):
+    assert not unwrap_calls
+    similarity = stack["band_b"].similarity
+    _write(similarity, np.full((10, 10), 0.9, "f4"), TRANSFORM_B)
+    with pytest.raises(ValueError, match="Grid differs from the band"):
+        run_main_diff_estimation(**stack, options=_options())
+
+
+def test_b_grid_must_not_be_finer_than_a(stack, unwrap_calls):
+    assert not unwrap_calls
+    stack["band_a"], stack["band_b"] = stack["band_b"], stack["band_a"]
+    with pytest.raises(ValueError, match="must not be finer"):
+        run_main_diff_estimation(**stack, options=_options())
+
+
 def test_other_unwrappers_are_rejected(stack, unwrap_calls):
     assert not unwrap_calls
     stack["unwrap_options"] = UnwrapOptions(unwrap_method="spurt")

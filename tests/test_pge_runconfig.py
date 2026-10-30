@@ -598,3 +598,13 @@ def test_ionosphere_options_are_not_passed_to_dolphin(runconfig_minimum):
     """The workflow model forbids unknown fields, so this would fail when built."""
     workflow = runconfig_minimum.to_workflow()
     assert "ionosphere_options" not in workflow.model_dump()
+
+
+def test_get_ionosphere_options_reads_the_main_parameters(runconfig_minimum, tmp_path):
+    path = tmp_path / "params.yaml"
+    AlgorithmParameters(
+        ionosphere_options=IonosphereOptions(method="main_diff")
+    ).to_yaml(path)
+    runconfig_minimum.dynamic_ancillary_file_group.algorithm_parameters_file = path
+
+    assert runconfig_minimum.get_ionosphere_options().method == "main_diff"
