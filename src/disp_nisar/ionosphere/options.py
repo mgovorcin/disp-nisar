@@ -108,5 +108,12 @@ class IonosphereOptions(BaseModel):
         ge=10,
         description="Block size of the background median (250 px = 10 km at 40 m).",
     )
+    strict_network: bool = Field(
+        False,
+        description=(
+            "Require identical A and B pair networks (historical behaviour). Off: use"
+            " the common real-date network, which is what forward mode needs."
+        ),
+    )
     resume: bool = True
     keep_intermediates: bool = False

@@ -792,13 +792,25 @@ def _run_locked(
         "ifg_B": _index(band_b.interferograms),
         "cor_B": _index(band_b.correlations),
     }
-    pairs = sorted(maps["ifg_A"])
-    if not pairs or any(set(m) != set(pairs) for m in maps.values()):
-        raise ValueError("A/B IFG and correlation networks must match exactly")
+    for b in ("A", "B"):
+        if set(maps[f"ifg_{b}"]) != set(maps[f"cor_{b}"]):
+            raise ValueError(f"Band {b}: interferogram and correlation networks differ")
     output_pairs = [_date_pair(Path(p)) for p in products]
+    from .network import select_pairs
+
+    # Forward mode: A carries compressed-reference pairs that B lacks and compressed
+    # epochs have no raw GSLC mask. D is estimated on the common real-date network
+    # (T6.1, Option A).
+    selection = select_pairs(
+        maps["ifg_A"],
+        maps["ifg_B"],
+        gslc_by_date,
+        output_pairs,
+        strict=options.strict_network,
+    )
+    pairs = selection.pairs
+    logger.info("Two-band network: %s", selection.summary)
     dates = sorted({d for pair in pairs for d in pair})
-    if any(d not in dates for pair in output_pairs for d in pair):
-        raise ValueError("Output requests an epoch absent from the common network")
     if missing := set(dates) - set(gslc_by_date):
         raise ValueError(f"Missing raw GSLC masks for acquisitions: {missing}")
     grids = {b: Grid.from_file(maps[f"ifg_{b}"][pairs[0]]) for b in ("A", "B")}
