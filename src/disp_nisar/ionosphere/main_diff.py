@@ -1,17 +1,21 @@
 """A/(A-B) estimation with fixed date-based output paths.
 
-Pair/inversion resume checks file existence. Filtered and exported rasters
-also check raw-input and filter-setting signatures. Changing upstream inputs,
-reference, or grid still requires invalidating affected upstream stages.
-Old untagged filtered/exported products are regenerated once.
+Completed stages are reused only while the settings and inputs recorded in
+settings.json still match; a mismatch stops the run rather than mixing results.
+Filtered and exported rasters also check raw-input and filter-setting signatures.
 Preparation/inversion are windowed; gap filling uses one full B-grid array.
 
 Dolphin/SNAPHU still controls unwrap memory. Phase-linked SLCs are consumed through
 existing stitched IFGs; independent A/B displacement series are not mixed here.
+
+Connected components are not used. All donors enter the inversion, so a whole-cycle
+offset between components of D reaches the correction amplified by about 12 at
+NISAR frequencies. Filtering does not repair such an offset.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from contextlib import ExitStack
@@ -24,6 +28,7 @@ import numpy as np
 import rasterio
 from dolphin import io
 from dolphin.utils import format_date_pair
+from dolphin.workflows.config import UnwrapOptions
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
@@ -225,7 +230,6 @@ def _prepare_pair(
     A is resampled as unit phasors onto B. Both observations use identical
     donor support. Interior non-donors receive unit placeholders with zero
     quality; pixels outside the footprint receive zero complex values.
-    Resume reuses existing outputs without checking whether inputs changed.
     Partial rasters are renamed only after every writer has closed.
 
     """
@@ -423,14 +427,13 @@ def _unwrap_pair(
     Returns
     -------
     dict[str, Path]
-        Unwrapped phase and component paths for both observations, plus
-        the donor mask. Prepared inputs remain only when requested.
+        Unwrapped phase paths for both observations, plus the donor mask. Prepared inputs remain only when requested.
 
     Notes
     -----
     The footprint controls where unwrapping is allowed; donor quality
     controls which observations are trusted during interpolation.
-    Existing phase/component pairs are reused when resume is enabled.
+    Existing unwrapped phases are reused when resume is enabled.
 
     """
     from dolphin.unwrap import unwrap
@@ -552,8 +555,8 @@ def select_common_reference(
     Parameters
     ----------
     jobs : list[dict[str, Path]]
-        Pair outputs containing donor masks, unwrapped phases, and
-        connected-component labels for both observations.
+        Pair outputs containing donor masks and unwrapped phases for both
+        observations.
     grid : Grid
         Common frequency-B grid.
     origin : tuple[int, int]
@@ -571,14 +574,7 @@ def select_common_reference(
     Raises
     ------
     ValueError
-        If no donor has finite phase and positive component labels for
-        both observations in every pair.
-
-    Notes
-    -----
-    Selection requires positive labels, but does not compare label IDs
-    between different rasters. Inversion subsequently restricts each
-    raster to the component containing this reference.
+        If no donor has finite phase for both observations in every pair.
 
     """
     io.write_arr(
@@ -649,8 +645,8 @@ def select_common_reference(
                 best = candidate
     if best is None:
         raise ValueError(
-            "No common A/D reference survives donor and "
-            "finite-phase/component checks; completed unwraps are retained"
+            "No common A/D reference survives donor and finite-phase checks; "
+            "completed unwraps are retained"
         )
     return best[1], best[2]
 
@@ -671,7 +667,7 @@ def _invert_jobs(
     Parameters
     ----------
     jobs : list[dict[str, Path]]
-        Donor, unwrapped-phase, and component rasters in pairs order.
+        Donor and unwrapped-phase rasters in pairs order.
     pairs : sequence[tuple]
         Ordered acquisition-date pairs defining the observation network.
     grid : Grid
@@ -689,9 +685,8 @@ def _invert_jobs(
 
     Notes
     -----
-    Each observation is spatially referenced and restricted to its
-    reference component. The earliest epoch is fixed at zero during
-    inversion. Outputs contain frequency-A ionospheric phase in radians,
+    Each observation is spatially referenced to the common pixel. The
+    earliest epoch is fixed at zero during inversion. Outputs contain frequency-A ionospheric phase in radians,
     with NaN nodata, on the B grid. No value is returned.
 
     """
@@ -802,8 +797,6 @@ def _export_correction(
     reference_a: tuple[int, int],
     block_size: int,
 ) -> None:
-    # Same matrix/sign as Dolphin inversion; convert raw phase by -lambda/(4*pi)
-    # exactly once. The A-B phase has no independent wavelength.
     """Export a re-referenced ionosphere correction in meters.
 
     Parameters
@@ -830,7 +823,8 @@ def _export_correction(
     -----
     Bilinear resampling operates on unwrapped ionospheric phase.
     Subtract the warped reference phase, then convert once using
-    -wavelength / (4*pi). The output has NaN nodata and meter units.
+    -wavelength / (4*pi), with the same matrix and sign as the Dolphin
+    inversion. The A-B phase has no independent wavelength. The output has NaN nodata and meter units.
     This function writes the file and returns no value.
 
     """
@@ -1046,6 +1040,82 @@ def run_main_diff_estimation(
         )
 
 
+def _settings_record(
+    band_a: BandInputs,
+    band_b: BandInputs,
+    gslc_by_date: dict,
+    reference_a: tuple[int, int],
+    f_A: float,
+    f_B: float,
+    unwrap_options: UnwrapOptions,
+    options: IonosphereOptions,
+) -> dict:
+    """Describe everything the masks, unwraps, and inversion depend on.
+
+    Filter settings are left out because filtered rasters carry their own
+    signature, so retuning the filter does not redo the unwrapping.
+    """
+    inputs = [
+        *band_a.interferograms,
+        *band_a.correlations,
+        band_a.similarity,
+        *band_b.interferograms,
+        *band_b.correlations,
+        band_b.similarity,
+        *gslc_by_date.values(),
+    ]
+    stats = {str(Path(p).resolve()): Path(p).stat() for p in inputs}
+    return {
+        "inputs": {p: [s.st_size, s.st_mtime_ns] for p, s in sorted(stats.items())},
+        "reference_a": list(reference_a),
+        "frequencies": [f_A, f_B],
+        "unwrap": unwrap_options.model_dump(mode="json", exclude={"n_parallel_jobs"}),
+        "options": options.model_dump(
+            mode="json",
+            exclude={
+                "block_size",
+                "filtering",
+                "keep_intermediates",
+                "mask_erosion_px",
+                "mask_work_mb",
+                "resume",
+                "smooth_sigma_m",
+            },
+        ),
+    }
+
+
+def _check_settings(out_dir: Path, record: dict, resume: bool) -> None:
+    """Stop a resume over results from other settings; clear them if not resuming.
+
+    Raises
+    ------
+    ValueError
+        If resuming and the recorded settings differ or are missing.
+
+    """
+    path = out_dir / "settings.json"
+    stages = [out_dir / n for n in ("masks", "pairs", "timeseries", "corrections")]
+    fix = "Set ionosphere_options.resume to false to discard them and start over."
+    if not resume:
+        for stage in stages:
+            shutil.rmtree(stage, ignore_errors=True)
+    elif path.is_file():
+        previous = json.loads(path.read_text())
+        changed = sorted(
+            k
+            for k in previous.keys() | record.keys()
+            if previous.get(k) != record.get(k)
+        )
+        if changed:
+            raise ValueError(
+                f"Existing results in {out_dir} used different {changed}. {fix}"
+            )
+    elif any(stage.exists() for stage in stages):
+        raise ValueError(f"Results in {out_dir} have no settings record. {fix}")
+    atomic_json(path, record)
+
+
 def _filter_cache_matches(
     path: Path, raw_path: Path, options: IonosphereOptions
 ) -> bool:
@@ -1106,8 +1176,6 @@ def _run_locked(
     -----
     Stages are mask caching, pair preparation/unwrapping, common-reference
     selection, network inversion, filtering/filling, and product export.
-    Resume relies on file existence: changed inputs or settings require
-    invalidating the affected outputs and their dependent stages.
     Filtering is selected by options.filtering. Its settings and the raw
     raster identity are checked before filled/correction outputs are reused.
 
@@ -1162,6 +1230,13 @@ def _run_locked(
     origin = int(np.floor(rb)), int(np.floor(cb))
     if not (0 <= origin[0] < target.height and 0 <= origin[1] < target.width):
         raise ValueError("Nominal A reference is outside the B grid")
+    _check_settings(
+        out_dir,
+        _settings_record(
+            band_a, band_b, gslc_by_date, reference_a, f_A, f_B, unwrap_options, options
+        ),
+        options.resume,
+    )
     raw_paths = [
         out_dir / "timeseries" / f"{format_date_pair(*pair)}_iono_B.rad.tif"
         for pair in output_pairs
