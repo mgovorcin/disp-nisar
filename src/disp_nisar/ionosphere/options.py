@@ -15,8 +15,8 @@ class IonosphereFilterOptions(YamlModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    method: Literal["isce3", "smooth_iono"] = Field(
-        "isce3", description="Filter applied to the ionospheric phase"
+    method: Literal["guided", "smooth_iono"] = Field(
+        "guided", description="Filter applied to the ionospheric phase"
     )
     sigma_m: tuple[float, float] | None = Field(
         None,

@@ -382,9 +382,9 @@ ionosphere_options:
   smooth_sigma_m: 400.0  # Fallback if filtering.sigma_m is null.
   mask_erosion_px: 3    # Fallback if filtering.donor_erosion_px is null.
   filtering:
-    # isce3: guide filter -> fill -> restore original valid -> final filter.
+    # guided: guide filter -> fill -> restore original valid -> final filter.
     # smooth_iono: existing nearest-fill + Gaussian implementation.
-    method: isce3
+    method: guided
     sigma_m: [300.0, 300.0]  # (row, column), Gaussian standard deviations in meters.
     kernel_size_px: null    # Optional positive odd (row, column) lengths.
     truncate: 4.0

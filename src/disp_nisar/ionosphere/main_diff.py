@@ -22,6 +22,7 @@ from typing import Sequence
 import numpy as np
 import rasterio
 from dolphin import io
+from dolphin.utils import format_date_pair
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
@@ -1093,9 +1094,7 @@ def _run_locked(
     if not products:
         return []
     final_paths = [
-        out_dir
-        / "corrections"
-        / ("_".join(d.strftime("%Y%m%d") for d in _date_pair(Path(p))) + "_iono.tif")
+        out_dir / "corrections" / f"{format_date_pair(*_date_pair(Path(p)))}_iono.tif"
         for p in products
     ]
     if len(set(final_paths)) != len(final_paths):
@@ -1143,9 +1142,7 @@ def _run_locked(
     if not (0 <= origin[0] < target.height and 0 <= origin[1] < target.width):
         raise ValueError("Nominal A reference is outside the B grid")
     raw_paths = [
-        out_dir
-        / "timeseries"
-        / ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B.rad.tif")
+        out_dir / "timeseries" / f"{format_date_pair(*pair)}_iono_B.rad.tif"
         for pair in output_pairs
     ]
     inversion_ready = options.resume and all(p.is_file() for p in raw_paths)
@@ -1180,7 +1177,7 @@ def _run_locked(
     )
     jobs = []
     for i, pair in enumerate([] if inversion_ready else pairs, 1):
-        name = "_".join(d.strftime("%Y%m%d") for d in pair)
+        name = format_date_pair(*pair)
         inputs = {n: m[pair] for n, m in maps.items()}
         inputs.update(sim_A=Path(band_a.similarity), sim_B=Path(band_b.similarity))
         masks = {
@@ -1252,7 +1249,7 @@ def _run_locked(
     correction_dir = out_dir / "corrections"
     timeseries_dir.mkdir(parents=True, exist_ok=True)
     correction_dir.mkdir(parents=True, exist_ok=True)
-    names = ["_".join(d.strftime("%Y%m%d") for d in pair) for pair in output_pairs]
+    names = [format_date_pair(*pair) for pair in output_pairs]
     intermediate = [timeseries_dir / f"{name}_iono_B.rad.tif" for name in names]
 
     if options.resume and all(p.is_file() for p in intermediate):

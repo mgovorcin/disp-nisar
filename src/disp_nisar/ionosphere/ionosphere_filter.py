@@ -1,10 +1,10 @@
 """Selectable filtering for real, unwrapped ionospheric phase in radians.
 
 The pipeline uses apply_ionosphere_filter() with validated algorithm-file
-options. Available methods are isce3 (guide/filter, fill, restore original
+options. Available methods are guided (guide/filter, fill, restore original
 observations, final filter) and smooth_iono (the existing smoother).
 
-The ISCE3-style method ports the sequence from IonosphereFilter.low_pass_filter.
+The guided method ports the sequence from ISCE3's IonosphereFilter.low_pass_filter.
 It uses SciPy, not the ISCE3 package, and does not claim bitwise equivalence.
 Source reviewed: isce-framework/isce3 at
 043aa4b84f94f6cd99b84b03bb8001c2b8ddab20, under
@@ -24,7 +24,7 @@ import numpy as np
 from scipy import ndimage as ndi
 
 from .options import IonosphereFilterOptions, IonosphereOptions
-from .utils import smooth_iono
+from .utils import _nn_fill, smooth_iono
 
 
 def _float_array(value: np.ndarray, shape: tuple[int, int] | None = None) -> np.ndarray:
@@ -76,10 +76,7 @@ def _fill_from_samples(
     """
     if not valid.any():
         return np.full(values.shape, np.nan, dtype=np.float64)
-    nearest = ndi.distance_transform_edt(
-        ~valid, return_distances=False, return_indices=True
-    )
-    filled = np.asarray(values[tuple(nearest)], dtype=np.float64)
+    filled = _nn_fill(values, valid).astype(np.float64)
     if method == "linear" and (~valid).any():
         from scipy.interpolate import griddata
         from scipy.spatial import QhullError
@@ -152,7 +149,7 @@ def _build_filter_guide(
     return _normalized_filter(guide, np.isfinite(guide), kernels)
 
 
-def filter_ionosphere_isce3(
+def filter_ionosphere_guided(
     phase: np.ndarray,
     *,
     donor_mask: np.ndarray,
@@ -162,7 +159,7 @@ def filter_ionosphere_isce3(
     sigma_m: tuple[float, float],
     donor_erosion_px: tuple[int, int] = (0, 0),
 ) -> np.ndarray:
-    """Apply the ISCE3-style guide/fill/restore/filter sequence.
+    """Apply the guide/fill/restore/filter sequence.
 
     Parameters
     ----------
@@ -274,8 +271,8 @@ def apply_ionosphere_filter(
         if settings.donor_erosion_px is not None
         else (0, options.mask_erosion_px)
     )
-    if settings.method == "isce3":
-        return filter_ionosphere_isce3(
+    if settings.method == "guided":
+        return filter_ionosphere_guided(
             phase,
             donor_mask=donor_mask,
             footprint=footprint,
