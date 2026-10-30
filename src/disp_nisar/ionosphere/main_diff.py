@@ -107,7 +107,7 @@ def _date_pair(path: Path) -> tuple[datetime, datetime]:
     ]
     if len(dates) != 2 or dates[0] >= dates[1]:
         raise ValueError(f"Expected one ordered acquisition pair: {path}")
-    return tuple(dates)
+    return dates[0], dates[1]
 
 
 def _index(paths: Sequence[Path]) -> dict[tuple[datetime, datetime], Path]:
@@ -427,7 +427,8 @@ def _unwrap_pair(
     Returns
     -------
     dict[str, Path]
-        Unwrapped phase paths for both observations, plus the donor mask. Prepared inputs remain only when requested.
+        Unwrapped phase paths for both observations, plus the donor mask.
+        Prepared inputs remain only when requested.
 
     Notes
     -----
@@ -447,7 +448,7 @@ def _unwrap_pair(
     )
     if unwrap_method not in ("snaphu", "whirlwind"):
         raise ValueError(
-            f"main_diff supports snaphu or whirlwind; " f"received {unwrap_method!r}"
+            f"main_diff supports snaphu or whirlwind; received {unwrap_method!r}"
         )
 
     # Validate all inputs before starting either unwrap.
@@ -686,7 +687,8 @@ def _invert_jobs(
     Notes
     -----
     Each observation is spatially referenced to the common pixel. The
-    earliest epoch is fixed at zero during inversion. Outputs contain frequency-A ionospheric phase in radians,
+    earliest epoch is fixed at zero during inversion. Outputs contain
+    frequency-A ionospheric phase in radians,
     with NaN nodata, on the B grid. No value is returned.
 
     """
@@ -694,7 +696,7 @@ def _invert_jobs(
 
     dates = sorted({date for pair in pairs for date in pair})
     idx = {date: i for i, date in enumerate(dates)}
-    design = build_design_matrix(pairs, dates)
+    design = build_design_matrix(list(pairs), dates)
 
     if np.linalg.matrix_rank(design) != len(dates) - 1:
         raise ValueError("A/D network is disconnected")
@@ -755,13 +757,10 @@ def _invert_jobs(
 
             phases = {}
             for band in bands:
-                phases[band] = (
-                    np.ma.stack(
-                        [reader[rows, cols] for reader in readers[f"{band}_unw"]]
-                    )
-                    .astype(np.float32)
-                    .filled(np.nan)
+                stack = np.ma.stack(
+                    [reader[rows, cols] for reader in readers[f"{band}_unw"]]
                 )
+                phases[band] = np.ma.filled(stack.astype(np.float32), np.nan)
                 phases[band] -= offsets[band][:, None, None]
 
             phase_a, phase_d = invert_common_phase_block(
@@ -824,7 +823,8 @@ def _export_correction(
     Bilinear resampling operates on unwrapped ionospheric phase.
     Subtract the warped reference phase, then convert once using
     -wavelength / (4*pi), with the same matrix and sign as the Dolphin
-    inversion. The A-B phase has no independent wavelength. The output has NaN nodata and meter units.
+    inversion. The A-B phase has no independent wavelength. The output has
+    NaN nodata and meter units.
     This function writes the file and returns no value.
 
     """
@@ -1214,8 +1214,12 @@ def _run_locked(
     grids = {b: Grid.from_file(maps[f"ifg_{b}"][pairs[0]]) for b in ("A", "B")}
     target = grids["B"]
     check_reduction(grids["A"], target)
-    for b, band in (("A", band_a), ("B", band_b)):
-        for p in (*band.interferograms, *band.correlations, band.similarity):
+    for b, inputs_b in (("A", band_a), ("B", band_b)):
+        for p in (
+            *inputs_b.interferograms,
+            *inputs_b.correlations,
+            inputs_b.similarity,
+        ):
             _same_grid(p, grids[b])
     pg = Grid.from_file(Path(products[0]))
     if pg.crs != target.crs:
@@ -1291,12 +1295,12 @@ def _run_locked(
             "D_unw": folder / "D.unw.tif",
             "donor": folder / "donor.tif",
         }
-        missing = [str(path) for path in ready.values() if not path.is_file()]
+        missing_files = [str(path) for path in ready.values() if not path.is_file()]
         logger.info(
             "%s: resume=%s; missing cached files=%s",
             name,
             options.resume,
-            missing,
+            missing_files,
         )
         if options.resume and all(p.is_file() for p in ready.values()):
             status = "reused"

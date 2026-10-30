@@ -151,7 +151,9 @@ class IonosphereOptions(YamlModel):
     mask_erosion_px: int = Field(
         3,
         ge=0,
-        description="Column erosion in pixels, used if filtering.donor_erosion_px is None",
+        description=(
+            "Column erosion in pixels, used if filtering.donor_erosion_px is None"
+        ),
     )
     filtering: IonosphereFilterOptions = Field(default_factory=IonosphereFilterOptions)
     nlooks: float = Field(

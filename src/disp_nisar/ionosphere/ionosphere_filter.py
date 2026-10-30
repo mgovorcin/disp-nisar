@@ -289,7 +289,7 @@ def apply_ionosphere_filter(
     valid = _erode(valid, erosion)
     if not valid.any():
         return np.full(data.shape, np.nan, np.float32)
-    sigma_px = tuple(s / d for s, d in zip(sigma_m, pixel_size_m, strict=True))
+    sigma_px = (sigma_m[0] / pixel_size_m[0], sigma_m[1] / pixel_size_m[1])
     filtered = smooth_iono(
         data, sigma=sigma_px, mask=valid, restore_mask=settings.restore_mask
     )

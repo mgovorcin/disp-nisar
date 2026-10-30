@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 from affine import Affine
 from dolphin import io
+from rasterio.io import DatasetReader
 from rasterio.windows import Window
 
 
@@ -49,7 +50,7 @@ class Grid:
         )
 
 
-def read_window(ds: rasterio.DatasetReader, window: Window) -> np.ndarray:
+def read_window(ds: DatasetReader, window: Window) -> np.ndarray:
     """Read declared nodata as NaN, preserving complex data and uint32 labels."""
     outside = (
         window.col_off < 0
@@ -58,7 +59,7 @@ def read_window(ds: rasterio.DatasetReader, window: Window) -> np.ndarray:
         or window.row_off + window.height > ds.height
     )
     a = ds.read(1, window=window, boundless=outside, masked=True)
-    dtype = np.complex64 if np.iscomplexobj(a) else np.float32
+    dtype: type = np.complex64 if np.iscomplexobj(a) else np.float32
     if np.issubdtype(a.dtype, np.integer) and a.dtype.itemsize >= 4:
         dtype = np.float64
     return a.astype(dtype).filled(np.nan)
