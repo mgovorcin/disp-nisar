@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import h5py
@@ -19,7 +20,9 @@ from ._main_diff_io import (
 from .utils import WORKING_TIFF_OPTIONS, check_reduction
 
 
-def _intervals(origin, step, dst_origin, dst_step, n):
+def _intervals(
+    origin: float, step: float, dst_origin: float, dst_step: float, n: int
+) -> tuple[np.ndarray, np.ndarray]:
     edges = (dst_origin + np.arange(n + 1) * dst_step - origin) / step
     rounded = np.rint(edges)
     edges = np.where(np.abs(edges - rounded) < 1e-6, rounded, edges)
@@ -29,7 +32,9 @@ def _intervals(origin, step, dst_origin, dst_step, n):
     )
 
 
-def _sums(a, r0, r1, c0, c1):
+def _sums(
+    a: np.ndarray, r0: np.ndarray, r1: np.ndarray, c0: np.ndarray, c1: np.ndarray
+) -> np.ndarray:
     ii = np.zeros((a.shape[0] + 1, a.shape[1] + 1), np.int64)
     np.cumsum(a, axis=0, dtype=np.int64, out=ii[1:, 1:])
     np.cumsum(ii[1:, 1:], axis=1, out=ii[1:, 1:])
@@ -41,7 +46,9 @@ def _sums(a, r0, r1, c0, c1):
     )
 
 
-def reduce_gslc_mask(dataset, source: Grid, target: Grid, mode: str, tile_size: int):
+def reduce_gslc_mask(
+    dataset: h5py.Dataset, source: Grid, target: Grid, mode: str, tile_size: int
+) -> Iterator[tuple[Window, np.ndarray, np.ndarray]]:
     """Yield window, valid donor, and footprint arrays without a native-sized read.
 
     Raw GSLC codes: 1..254 valid subswath IDs, 0 invalid inside, 255 outside.

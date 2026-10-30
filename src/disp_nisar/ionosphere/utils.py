@@ -7,6 +7,7 @@ Used by both the GUNW and GSLC split-spectrum workflows.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import rasterio
@@ -15,6 +16,9 @@ from rasterio.enums import Resampling
 from rasterio.warp import reproject as rio_reproject
 from rasterio.windows import Window, bounds, from_bounds, transform
 from scipy.ndimage import distance_transform_edt, gaussian_filter
+
+if TYPE_CHECKING:
+    from ._main_diff_io import Grid
 
 # ---------------------------------------------------------------------------
 # Constants

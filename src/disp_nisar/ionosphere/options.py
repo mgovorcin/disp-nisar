@@ -68,7 +68,9 @@ class IonosphereFilterOptions(YamlModel):
 
     @field_validator("sigma_m")
     @classmethod
-    def positive_widths(cls, value):
+    def positive_widths(
+        cls, value: tuple[float, float] | None
+    ) -> tuple[float, float] | None:
         """Require finite, positive Gaussian widths when explicitly supplied."""
         if value is not None and any(v <= 0 for v in value):
             raise ValueError("sigma_m widths must be positive")
@@ -76,7 +78,7 @@ class IonosphereFilterOptions(YamlModel):
 
     @field_validator("kernel_size_px")
     @classmethod
-    def odd_kernel_sizes(cls, value):
+    def odd_kernel_sizes(cls, value: tuple[int, int] | None) -> tuple[int, int] | None:
         """Require positive odd full kernel lengths."""
         if value is not None and any(v < 1 or v % 2 != 1 for v in value):
             raise ValueError("kernel_size_px lengths must be positive and odd")
@@ -84,7 +86,7 @@ class IonosphereFilterOptions(YamlModel):
 
     @field_validator("guide_median_size")
     @classmethod
-    def odd_median_size(cls, value):
+    def odd_median_size(cls, value: int) -> int:
         """Keep the median guide centered on each pixel."""
         if value % 2 != 1:
             raise ValueError("guide_median_size must be odd")
@@ -92,7 +94,9 @@ class IonosphereFilterOptions(YamlModel):
 
     @field_validator("donor_erosion_px")
     @classmethod
-    def nonnegative_erosion(cls, value):
+    def nonnegative_erosion(
+        cls, value: tuple[int, int] | None
+    ) -> tuple[int, int] | None:
         """Require nonnegative erosion radii in pixels."""
         if value is not None and any(v < 0 for v in value):
             raise ValueError("donor_erosion_px must be nonnegative")

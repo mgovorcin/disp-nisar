@@ -16,6 +16,7 @@ import logging
 import shutil
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -75,7 +76,7 @@ class BandInputs:
     similarity: Path
 
 
-def _date_pair(path: Path) -> tuple:
+def _date_pair(path: Path) -> tuple[datetime, datetime]:
     """Extract an ordered acquisition-date pair from a raster filename.
 
     Parameters
@@ -104,7 +105,7 @@ def _date_pair(path: Path) -> tuple:
     return tuple(dates)
 
 
-def _index(paths: Sequence[Path]) -> dict:
+def _index(paths: Sequence[Path]) -> dict[tuple[datetime, datetime], Path]:
     """Index acquisition-pair rasters by their normalized dates.
 
     Parameters
@@ -133,13 +134,13 @@ def _index(paths: Sequence[Path]) -> dict:
 
 
 def estimate_iono_main_diff(
-    f_a: float, f_b: float, phase_a: np.ndarray, phase_d: np.ndarray
+    f_A: float, f_B: float, phase_a: np.ndarray, phase_d: np.ndarray
 ) -> np.ndarray:
     """Estimate frequency-A ionospheric phase from A and A-minus-B.
 
     Parameters
     ----------
-    f_a, f_b : float
+    f_A, f_B : float
         Distinct positive center frequencies, in Hz.
     phase_a, phase_d : np.ndarray
         Unwrapped phases or phase time series, in radians. Arrays must
@@ -158,19 +159,19 @@ def estimate_iono_main_diff(
         If frequencies are invalid or indistinguishable, or shapes differ.
 
     """
-    if not (np.isfinite(f_a) and np.isfinite(f_b) and min(f_a, f_b) > 0):
+    if not (np.isfinite(f_A) and np.isfinite(f_B) and min(f_A, f_B) > 0):
         raise ValueError("Center frequencies must be finite and positive")
-    if abs(f_a - f_b) <= 1e-8 * max(f_a, f_b):
+    if abs(f_A - f_B) <= 1e-8 * max(f_A, f_B):
         raise ValueError("Center frequencies are indistinguishable")
     if phase_a.shape != phase_d.shape:
         raise ValueError("A and D shapes differ")
     return (
-        f_b / (f_a + f_b) * phase_a.astype(np.float64)
-        + f_a * f_b / (f_b * f_b - f_a * f_a) * phase_d.astype(np.float64)
+        f_B / (f_A + f_B) * phase_a.astype(np.float64)
+        + f_A * f_B / (f_B * f_B - f_A * f_A) * phase_d.astype(np.float64)
     ).astype(np.float32)
 
 
-def _same_grid(path, grid):
+def _same_grid(path: Path, grid: Grid) -> None:
     """Require a raster to match a supplied grid exactly.
 
     Parameters
@@ -190,7 +191,13 @@ def _same_grid(path, grid):
         raise ValueError(f"Grid differs from the band's stitched IFG: {path}")
 
 
-def _prepare_pair(inputs, masks, target, folder, options):
+def _prepare_pair(
+    inputs: dict[str, Path],
+    masks: dict[str, Path],
+    target: Grid,
+    folder: Path,
+    options: IonosphereOptions,
+) -> dict[str, Path]:
     """Prepare masked A and D observations on the frequency-B grid.
 
     Parameters
@@ -392,7 +399,12 @@ def _prepare_pair(inputs, masks, target, folder, options):
     return outputs
 
 
-def _unwrap_pair(prepared, folder, unwrap_options, options):
+def _unwrap_pair(
+    prepared: dict[str, Path],
+    folder: Path,
+    unwrap_options: UnwrapOptions,
+    options: IonosphereOptions,
+) -> dict[str, Path]:
     """Unwrap both prepared observations and retain original donor support.
 
     Parameters
@@ -508,7 +520,7 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
     return result
 
 
-def _sample(path, reference):
+def _sample(path: Path, reference: tuple[int, int]) -> float:
     """Read a single raster value at a row-column reference.
 
     Parameters
@@ -644,16 +656,16 @@ def select_common_reference(
 
 
 def _invert_jobs(
-    jobs,
-    pairs,
-    grid,
-    reference,
-    f_a,
-    f_b,
-    outputs,
-    output_pairs,
-    block_size,
-):
+    jobs: list[dict[str, Path]],
+    pairs: Sequence[tuple[datetime, datetime]],
+    grid: Grid,
+    reference: tuple[int, int],
+    f_A: float,
+    f_B: float,
+    outputs: Sequence[Path],
+    output_pairs: Sequence[tuple[datetime, datetime]],
+    block_size: int,
+) -> None:
     """Invert referenced pair phases and write ionosphere date-pair rasters.
 
     Parameters
@@ -666,7 +678,7 @@ def _invert_jobs(
         Common frequency-B grid for block processing.
     reference : tuple[int, int]
         Common reference row and column on the B grid.
-    f_a, f_b : float
+    f_A, f_B : float
         Center frequencies, in Hz.
     outputs : sequence[Path]
         Output paths, ordered like output_pairs.
@@ -764,7 +776,7 @@ def _invert_jobs(
                 valid,
             )
 
-            iono = estimate_iono_main_diff(f_a, f_b, phase_a, phase_d)
+            iono = estimate_iono_main_diff(f_A, f_B, phase_a, phase_d)
 
             # The inversion omits the earliest epoch, whose phase is fixed at zero.
             # Restore it before differencing arbitrary requested epoch pairs.
@@ -782,7 +794,14 @@ def _invert_jobs(
                 )
 
 
-def _export_correction(source, match, output, f_a, reference_a, block_size):
+def _export_correction(
+    source: Path,
+    match: Path,
+    output: Path,
+    f_A: float,
+    reference_a: tuple[int, int],
+    block_size: int,
+) -> None:
     # Same matrix/sign as Dolphin inversion; convert raw phase by -lambda/(4*pi)
     # exactly once. The A-B phase has no independent wavelength.
     """Export a re-referenced ionosphere correction in meters.
@@ -795,7 +814,7 @@ def _export_correction(source, match, output, f_a, reference_a, block_size):
         Nominal displacement raster defining the output grid.
     output : str or Path
         Destination correction raster, typically a partial filename.
-    f_a : float
+    f_A : float
         Frequency-A center frequency, in Hz.
     reference_a : tuple[int, int]
         Nominal reference row and column on the output grid.
@@ -816,7 +835,7 @@ def _export_correction(source, match, output, f_a, reference_a, block_size):
 
     """
     target = Grid.from_file(match)
-    wavelength = freq_to_wavelength(f_a)
+    wavelength = freq_to_wavelength(f_A)
     with (
         rasterio.open(source) as src,
         WarpedVRT(
@@ -958,10 +977,10 @@ def run_main_diff_estimation(
     gslc_by_date: dict,
     output_timeseries_paths: Sequence[Path],
     reference_a: tuple[int, int],
-    f_a: float,
-    f_b: float,
+    f_A: float,
+    f_B: float,
     out_dir: Path,
-    unwrap_options,
+    unwrap_options: UnwrapOptions,
     options: IonosphereOptions,
 ) -> list[Path]:
     """Run A/(A-B) ionosphere processing under an output lock.
@@ -977,7 +996,7 @@ def run_main_diff_estimation(
         Nominal displacement rasters defining requested pairs and grids.
     reference_a : tuple[int, int]
         Nominal reference row and column on the product grid.
-    f_a, f_b : float
+    f_A, f_B : float
         Constant center frequencies, in Hz.
     out_dir : Path
         Directory for masks, pair products, inversion, and corrections.
@@ -1019,15 +1038,17 @@ def run_main_diff_estimation(
             gslc_by_date,
             output_timeseries_paths,
             reference_a,
-            f_a,
-            f_b,
+            f_A,
+            f_B,
             out_dir,
             unwrap_options,
             options,
         )
 
 
-def _filter_cache_matches(path, raw_path, options):
+def _filter_cache_matches(
+    path: Path, raw_path: Path, options: IonosphereOptions
+) -> bool:
     """Reuse a filtered/exported raster only for the same raw input and settings.
 
     Untagged products from earlier versions are regenerated. A failed metadata
@@ -1044,17 +1065,17 @@ def _filter_cache_matches(path, raw_path, options):
 
 
 def _run_locked(
-    band_a,
-    band_b,
-    gslc_by_date,
-    products,
-    reference_a,
-    f_a,
-    f_b,
-    out_dir,
-    unwrap_options,
-    options,
-):
+    band_a: BandInputs,
+    band_b: BandInputs,
+    gslc_by_date: dict,
+    products: Sequence[Path],
+    reference_a: tuple[int, int],
+    f_A: float,
+    f_B: float,
+    out_dir: Path,
+    unwrap_options: UnwrapOptions,
+    options: IonosphereOptions,
+) -> list[Path]:
     """Process a matching A/B network while the caller holds the lock.
 
     Parameters
@@ -1067,7 +1088,7 @@ def _run_locked(
         Nominal rasters defining requested output pairs and grids.
     reference_a : tuple[int, int]
         Nominal product reference row and column.
-    f_a, f_b : float
+    f_A, f_B : float
         Constant center frequencies, in Hz.
     out_dir : Path
         Resolved output-directory path.
@@ -1102,8 +1123,8 @@ def _run_locked(
     # Filter settings must be checked against each raw raster before reusing
     # final products. An existence-only early return would ignore config edits.
     estimate_iono_main_diff(
-        f_a,
-        f_b,
+        f_A,
+        f_B,
         np.zeros((1, 1)),
         np.zeros((1, 1)),
     )
@@ -1272,8 +1293,8 @@ def _run_locked(
             pairs,
             target,
             reference,
-            f_a,
-            f_b,
+            f_A,
+            f_B,
             temporary,
             output_pairs,
             options.block_size,
@@ -1363,7 +1384,7 @@ def _run_locked(
             filled_path,
             Path(match),
             temporary_output,
-            f_a,
+            f_A,
             reference_a,
             options.block_size,
         )

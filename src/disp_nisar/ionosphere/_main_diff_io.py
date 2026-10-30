@@ -49,7 +49,7 @@ class Grid:
         )
 
 
-def read_window(ds, window: Window) -> np.ndarray:
+def read_window(ds: rasterio.DatasetReader, window: Window) -> np.ndarray:
     """Read declared nodata as NaN, preserving complex data and uint32 labels."""
     outside = (
         window.col_off < 0
