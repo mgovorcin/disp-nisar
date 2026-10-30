@@ -394,6 +394,7 @@ class RunConfig(YamlModel):
         self,
         frequency: str | None = None,
         scratch_suffix: str | None = None,
+        skip_compressed: bool = False,
     ):
         """Convert to a `DisplacementWorkflow` object.
 
@@ -406,6 +407,9 @@ class RunConfig(YamlModel):
             Suffix appended to ``scratch_path`` to keep separate work directories.
             Defaults to ``""`` for the configured frequency, or ``"_<frequency>"``
             when ``frequency`` overrides the configured value.
+        skip_compressed : bool
+            Leave compressed SLCs out of the inputs, for a band that is phase-linked
+            only on the real acquisitions. Defaults to False.
 
         """
         configured_freq = str(self.input_file_group.frequency)
@@ -423,6 +427,7 @@ class RunConfig(YamlModel):
             algorithm_parameters_file=algo_file,
             frequency=freq,
             scratch_suffix=scratch_suffix,
+            skip_compressed=skip_compressed,
         )
 
     def get_ionosphere_options(self) -> IonosphereOptions:
@@ -467,6 +472,7 @@ class RunConfig(YamlModel):
         algorithm_parameters_file: Path,
         frequency: str,
         scratch_suffix: str = "",
+        skip_compressed: bool = False,
     ):
         """Build a `DisplacementWorkflow` from this RunConfig.
 
@@ -479,10 +485,17 @@ class RunConfig(YamlModel):
         scratch_suffix : str
             Suffix appended to ``scratch_path`` to keep freqA and freqB work
             directories separate (e.g. ``"_ionosphere"``).
+        skip_compressed : bool
+            Leave compressed SLCs out of the inputs.
 
         """
+        input_files = self.input_file_group.gslc_file_list
+        if skip_compressed:
+            input_files = [
+                f for f in input_files if "compressed" not in Path(f).name.lower()
+            ]
         # PGE doesn't sort the GSLCs in date order (or any order?)
-        gslc_file_list = sort_files_by_date(self.input_file_group.gslc_file_list)[0]
+        gslc_file_list = sort_files_by_date(input_files)[0]
         base_scratch = self.product_path_group.scratch_path
         scratch_directory = (
             base_scratch.with_name(base_scratch.name + scratch_suffix)
@@ -543,7 +556,7 @@ class RunConfig(YamlModel):
         # as well
 
         bounds_epsg_gslc, bounds_gslc = get_nisar_frame_bbox(
-            self.input_file_group.gslc_file_list[0],
+            input_files[0],
             frequency=frequency,
             polarization=polarization,
         )

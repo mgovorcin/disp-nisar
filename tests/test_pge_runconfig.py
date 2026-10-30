@@ -238,6 +238,37 @@ def sample_gunw_list():
     ]
 
 
+def test_skip_compressed_leaves_only_real_inputs(
+    dynamic_ancillary_file_group,
+    static_ancillary_file_group,
+    product_path_group,
+    sample_slc_list,
+    monkeypatch,
+):
+    bounds = pge_runconfig.get_nisar_frame_bbox(sample_slc_list[0])
+    rc = RunConfig(
+        input_file_group=InputFileGroup(gslc_file_list=sample_slc_list, frame_id=23210),
+        primary_executable=PrimaryExecutable(),
+        dynamic_ancillary_file_group=dynamic_ancillary_file_group,
+        static_ancillary_file_group=static_ancillary_file_group,
+        product_path_group=product_path_group,
+    )
+    assert any("COMPRESSED" in Path(f).name for f in rc.to_workflow().cslc_file_list)
+
+    seen = []
+
+    def fake_bbox(path, **_kwargs):
+        seen.append(path)
+        return bounds
+
+    monkeypatch.setattr(pge_runconfig, "get_nisar_frame_bbox", fake_bbox)
+    files = rc.to_workflow(skip_compressed=True).cslc_file_list
+
+    assert len(files) == len(sample_slc_list) - 3
+    assert not any("COMPRESSED" in Path(f).name for f in files)
+    assert "COMPRESSED" not in Path(seen[0]).name
+
+
 def test_reference_changeover(
     dynamic_ancillary_file_group,
     static_ancillary_file_group,

@@ -46,6 +46,7 @@ from .ionosphere_filter import (
     apply_ionosphere_filter,
     filter_cache_signature,
 )
+from .network import select_pairs
 from .options import IonosphereOptions
 from .utils import (
     WORKING_TIFF_OPTIONS,
@@ -982,13 +983,14 @@ def run_main_diff_estimation(
     unwrap_options: UnwrapOptions,
     options: IonosphereOptions,
     incidence_file: Path | None = None,
+    strict_network: bool = True,
 ) -> list[Path]:
     """Run A/(A-B) ionosphere processing under an output lock.
 
     Parameters
     ----------
     band_a, band_b : BandInputs
-        Matching stitched IFG networks on their respective band grids.
+        Stitched IFG networks on their respective band grids.
     gslc_by_date : dict
         Acquisition dates normalized to midnight, mapped to local raw
         GSLC inputs used for phase linking.
@@ -1006,6 +1008,9 @@ def run_main_diff_estimation(
         Estimation, quality, memory, resume, and retention settings.
     incidence_file : Path, optional
         Incidence-angle raster. The robust filter needs it to find near range.
+    strict_network : bool
+        Require identical A and B networks. Forward runs turn this off to use the
+        common real-date pairs, since A carries compressed SLCs and B does not.
 
     Returns
     -------
@@ -1046,6 +1051,7 @@ def run_main_diff_estimation(
             unwrap_options,
             options,
             incidence_file,
+            strict_network,
         )
 
 
@@ -1290,8 +1296,9 @@ def _run_locked(
     unwrap_options: UnwrapOptions,
     options: IonosphereOptions,
     incidence_file: Path | None,
+    strict_network: bool,
 ) -> list[Path]:
-    """Process a matching A/B network while the caller holds the lock.
+    """Process the A/B network while the caller holds the lock.
 
     Parameters
     ----------
@@ -1313,6 +1320,8 @@ def _run_locked(
         Method, quality thresholds, memory limits, and restart settings.
     incidence_file : Path or None
         Incidence-angle raster used by the robust filter.
+    strict_network : bool
+        Require identical A and B networks, rather than their common real-date pairs.
 
     Returns
     -------
@@ -1349,13 +1358,21 @@ def _run_locked(
         "ifg_B": _index(band_b.interferograms),
         "cor_B": _index(band_b.correlations),
     }
-    pairs = sorted(maps["ifg_A"])
-    if not pairs or any(set(m) != set(pairs) for m in maps.values()):
-        raise ValueError("A/B IFG and correlation networks must match exactly")
+    for b in ("A", "B"):
+        if set(maps[f"ifg_{b}"]) != set(maps[f"cor_{b}"]):
+            raise ValueError("A/B IFG and correlation networks must match exactly")
     output_pairs = [_date_pair(Path(p)) for p in products]
+    selection = select_pairs(
+        maps["ifg_A"],
+        maps["ifg_B"],
+        # A strict run reports a pair's missing GSLC instead of dropping the pair.
+        {d for pair in maps["ifg_A"] for d in pair} if strict_network else gslc_by_date,
+        output_pairs,
+        strict=strict_network,
+    )
+    pairs = selection.pairs
+    logger.info("Two-band network: %s", selection.summary)
     dates = sorted({d for pair in pairs for d in pair})
-    if any(d not in dates for pair in output_pairs for d in pair):
-        raise ValueError("Output requests an epoch absent from the common network")
     if missing := set(dates) - set(gslc_by_date):
         raise ValueError(f"Missing raw GSLC masks for acquisitions: {missing}")
     grids = {b: Grid.from_file(maps[f"ifg_{b}"][pairs[0]]) for b in ("A", "B")}

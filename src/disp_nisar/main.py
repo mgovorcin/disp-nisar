@@ -67,7 +67,7 @@ def run(
     # Save the start for a metadata field
     processing_start_datetime = datetime.now(timezone.utc)
 
-    main_diff_options = _get_main_diff_options(cfg, pge_runconfig)
+    main_diff_options = _get_main_diff_options(pge_runconfig)
 
     # Add a check to fail if passed duplicate dates area passed
     _assert_no_duplicate_dates(cfg.cslc_file_list)
@@ -383,9 +383,7 @@ def run(
     logger.info(f"Current running disp_nisar version: {__version__}")
 
 
-def _get_main_diff_options(
-    cfg: DisplacementWorkflow, pge_runconfig: RunConfig
-) -> IonosphereOptions | None:
+def _get_main_diff_options(pge_runconfig: RunConfig) -> IonosphereOptions | None:
     """Return the options when this run uses main_diff, otherwise None.
 
     Runs with GUNW inputs read the phase screen from those products, and
@@ -404,13 +402,6 @@ def _get_main_diff_options(
         return None
     if pge_runconfig.input_file_group.frequency != "frequencyA":
         raise ValueError("main_diff requires a nominal frequencyA workflow")
-    if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD" or any(
-        "compressed" in f.name.lower() for f in cfg.cslc_file_list
-    ):
-        raise ValueError(
-            "main_diff supports uncompressed historical GSLC stacks only;"
-            " forward/compressed A/B state is not yet supported"
-        )
     if (
         pge_runconfig.dynamic_ancillary_file_group.ionosphere_algorithm_parameters_file
         is None
@@ -433,8 +424,11 @@ def _run_main_diff_workflow(
 
     if not product_paths:
         return []
+    # B is phase-linked fresh on the real dates; compressed SLCs belong to A's stack.
     cfg_b = pge_runconfig.to_workflow(
-        frequency="frequencyB", scratch_suffix="_freqB_main_diff"
+        frequency="frequencyB",
+        scratch_suffix="_freqB_main_diff",
+        skip_compressed=True,
     )
     cfg_b.output_options.bounds = cfg.output_options.bounds
     cfg_b.output_options.bounds_epsg = cfg.output_options.bounds_epsg
@@ -455,7 +449,11 @@ def _run_main_diff_workflow(
     out_b = run_displacement(cfg=cfg_b, debug=debug, raise_on_empty=False)
     gslc_by_date = {}
     frequencies = None
+    has_compressed = False
     for path in cfg.cslc_file_list:
+        if "compressed" in Path(path).name.lower():
+            has_compressed = True
+            continue
         date = get_dates(path)[0].replace(hour=0, minute=0, second=0, microsecond=0)
         if date in gslc_by_date:
             raise ValueError(f"Duplicate GSLC acquisition: {date}")
@@ -492,6 +490,10 @@ def _run_main_diff_workflow(
             Path(cfg.correction_options.geometry_files[0])
             if cfg.correction_options.geometry_files
             else None
+        ),
+        strict_network=not (
+            has_compressed
+            or pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD"
         ),
     )
     _prune_block_dirs(cfg_b.work_directory)

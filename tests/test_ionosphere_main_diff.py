@@ -434,6 +434,51 @@ def test_networks_must_match(stack, unwrap_calls):
         run_main_diff_estimation(**stack, options=_options())
 
 
+def _add_compressed_pair(stack):
+    """Give A a pair with a compressed reference, which B and the masks lack."""
+    band_a = stack["band_a"]
+    ifg, cor = band_a.interferograms[0], band_a.correlations[0]
+    extra_ifg = ifg.with_name(f"20251201_{DATES[0]}.int.tif")
+    extra_cor = cor.with_name(f"20251201_{DATES[0]}.cor.tif")
+    extra_ifg.write_bytes(ifg.read_bytes())
+    extra_cor.write_bytes(cor.read_bytes())
+    stack["band_a"] = BandInputs(
+        [*band_a.interferograms, extra_ifg],
+        [*band_a.correlations, extra_cor],
+        band_a.similarity,
+    )
+
+
+def test_forward_network_matches_the_historical_correction(stack, unwrap_calls):
+    historical = _read(run_main_diff_estimation(**stack, options=_options())[0])
+    count = len(unwrap_calls)
+    _add_compressed_pair(stack)
+
+    forward = run_main_diff_estimation(
+        **stack, options=_options(resume=False), strict_network=False
+    )
+
+    assert len(unwrap_calls) == 2 * count  # the compressed pair is not unwrapped
+    np.testing.assert_array_equal(_read(forward[0]), historical)
+
+
+def test_historical_run_rejects_a_compressed_pair(stack, unwrap_calls):
+    _add_compressed_pair(stack)
+    with pytest.raises(ValueError, match="networks must match exactly"):
+        run_main_diff_estimation(**stack, options=_options())
+    assert not unwrap_calls
+
+
+def test_bands_must_have_a_correlation_per_ifg(stack, unwrap_calls):
+    band_b = stack["band_b"]
+    stack["band_b"] = BandInputs(
+        band_b.interferograms, band_b.correlations[:-1], band_b.similarity
+    )
+    with pytest.raises(ValueError, match="networks must match exactly"):
+        run_main_diff_estimation(**stack, options=_options(), strict_network=False)
+    assert not unwrap_calls
+
+
 def test_missing_gslc_is_reported(stack, unwrap_calls):
     assert not unwrap_calls
     stack["gslc_by_date"].pop(next(iter(stack["gslc_by_date"])))

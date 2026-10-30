@@ -28,9 +28,8 @@ def _main_diff_inputs(
     gunw_files=None,
     iono_parameters=Path("algorithm_parameters_freqB.yaml"),
     frequency="frequencyA",
-    gslc_name="NISAR_L2_GSLC_20260101.h5",
 ):
-    pge_runconfig = SimpleNamespace(
+    return SimpleNamespace(
         get_ionosphere_options=lambda: IonosphereOptions(method=method),
         dynamic_ancillary_file_group=SimpleNamespace(
             gunw_files=gunw_files,
@@ -39,7 +38,6 @@ def _main_diff_inputs(
         input_file_group=SimpleNamespace(frequency=frequency),
         primary_executable=SimpleNamespace(product_type=product_type),
     )
-    return SimpleNamespace(cslc_file_list=[Path(gslc_name)]), pge_runconfig
 
 
 @pytest.mark.parametrize(
@@ -54,32 +52,34 @@ def _main_diff_inputs(
     ],
 )
 def test_main_diff_is_opt_in(kwargs):
-    cfg, pge_runconfig = _main_diff_inputs(**kwargs)
-    assert main._get_main_diff_options(cfg, pge_runconfig) is None
+    assert main._get_main_diff_options(_main_diff_inputs(**kwargs)) is None
 
 
 def test_default_method_keeps_the_split_spectrum_workflow():
     assert IonosphereOptions().method == "main_side"
 
 
+def test_main_diff_runs_in_forward_mode():
+    options = main._get_main_diff_options(
+        _main_diff_inputs(product_type="DISP_NISAR_FORWARD")
+    )
+    assert options.method == "main_diff"
+
+
 def test_main_diff_selected():
-    cfg, pge_runconfig = _main_diff_inputs()
-    assert main._get_main_diff_options(cfg, pge_runconfig).method == "main_diff"
+    assert main._get_main_diff_options(_main_diff_inputs()).method == "main_diff"
 
 
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"frequency": "frequencyB"}, "nominal frequencyA"),
-        ({"product_type": "DISP_NISAR_FORWARD"}, "historical GSLC stacks only"),
-        ({"gslc_name": "compressed_20260101.h5"}, "historical GSLC stacks only"),
         ({"iono_parameters": None}, "explicit frequencyB algorithm file"),
     ],
 )
 def test_main_diff_rejects_unsupported_runs(kwargs, message):
-    cfg, pge_runconfig = _main_diff_inputs(**kwargs)
     with pytest.raises(ValueError, match=message):
-        main._get_main_diff_options(cfg, pge_runconfig)
+        main._get_main_diff_options(_main_diff_inputs(**kwargs))
 
 
 def test_nodata_mask_keeps_valid_zeros(tmp_path):
@@ -141,7 +141,9 @@ class _Workflow(SimpleNamespace):
 @pytest.fixture
 def main_diff_run(monkeypatch):
     """Stub the expensive stages, recording what the workflow hands them."""
-    seen = SimpleNamespace(cfg_b=_Workflow(), estimation=None, displacement=None)
+    seen = SimpleNamespace(
+        cfg_b=_Workflow(), estimation=None, displacement=None, workflow_kwargs=None
+    )
     outputs_b = SimpleNamespace(
         stitched_ifg_paths=["b.int.tif"],
         stitched_cor_paths=["b.cor.tif"],
@@ -176,6 +178,7 @@ def _run_workflow(
     gslcs=("g_20260101.h5", "g_20260113.h5"),
     products=None,
     geometry_files=("incidence.tif", "los_east.tif", "los_north.tif"),
+    product_type="DISP_NISAR_HISTORICAL",
 ):
     cfg = SimpleNamespace(
         cslc_file_list=[Path(g) for g in gslcs],
@@ -186,7 +189,15 @@ def _run_workflow(
         work_directory=Path("scratch"),
         correction_options=SimpleNamespace(geometry_files=geometry_files),
     )
-    pge_runconfig = SimpleNamespace(to_workflow=lambda **_kwargs: seen.cfg_b)
+
+    def to_workflow(**kwargs):
+        seen.workflow_kwargs = kwargs
+        return seen.cfg_b
+
+    pge_runconfig = SimpleNamespace(
+        to_workflow=to_workflow,
+        primary_executable=SimpleNamespace(product_type=product_type),
+    )
     full_outputs = SimpleNamespace(
         stitched_ifg_paths=["a.int.tif"],
         stitched_cor_paths=["a.cor.tif"],
@@ -240,6 +251,28 @@ def test_main_diff_workflow_passes_the_incidence_layer(main_diff_run):
 def test_main_diff_workflow_runs_without_geometry(main_diff_run):
     _run_workflow(main_diff_run, geometry_files=())
     assert main_diff_run.estimation["incidence_file"] is None
+
+
+def test_historical_workflow_requires_identical_networks(main_diff_run):
+    _run_workflow(main_diff_run)
+    assert main_diff_run.estimation["strict_network"] is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"product_type": "DISP_NISAR_FORWARD"},
+        {"gslcs": ("compressed_20251201.h5", "g_20260101.h5", "g_20260113.h5")},
+    ],
+)
+def test_forward_workflow_uses_the_common_network(main_diff_run, kwargs):
+    _run_workflow(main_diff_run, **kwargs)
+    assert main_diff_run.estimation["strict_network"] is False
+    assert main_diff_run.workflow_kwargs["skip_compressed"] is True
+    assert [d.strftime("%Y%m%d") for d in main_diff_run.estimation["gslc_by_date"]] == [
+        "20260101",
+        "20260113",
+    ]
 
 
 def test_main_diff_workflow_without_products_does_nothing(main_diff_run):
