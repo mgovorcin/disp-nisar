@@ -477,6 +477,12 @@ def _run_main_diff_workflow(
     if frequencies is None:
         raise ValueError("No GSLC inputs for main_diff")
     ref = read_reference_point(product_paths[0].parent)
+    if cfg.correction_options.geometry_files and options.near_range_exclude_km > 0:
+        # static-layer incidence angle: locates the near-range band the screen must not
+        # be estimated from
+        options = options.model_copy(
+            update={"incidence_path": Path(cfg.correction_options.geometry_files[0])}
+        )
     result = run_main_diff_estimation(
         band_a=BandInputs(
             full_outputs.stitched_ifg_paths,
