@@ -95,9 +95,7 @@ def test_nodata_mask_keeps_valid_zeros(tmp_path):
 
 
 def _write_iono(path, units, metadata=None):
-    io.write_arr(
-        arr=np.ones((2, 2), dtype=np.float32), output_name=path, units=units
-    )
+    io.write_arr(arr=np.ones((2, 2), dtype=np.float32), output_name=path, units=units)
     if metadata:
         io.set_raster_metadata(path, metadata)
     return path

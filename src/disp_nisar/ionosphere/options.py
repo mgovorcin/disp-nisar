@@ -15,7 +15,7 @@ class IonosphereFilterOptions(YamlModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    method: Literal["isce3", "smooth_iono", "donor_only"] = Field(
+    method: Literal["isce3", "smooth_iono"] = Field(
         "isce3", description="Filter applied to the ionospheric phase"
     )
     sigma_m: tuple[float, float] | None = Field(
@@ -34,9 +34,6 @@ class IonosphereFilterOptions(YamlModel):
     )
     truncate: float = Field(
         4.0, gt=0, description="Kernel half-width, in standard deviations"
-    )
-    iterations: int = Field(
-        1, ge=1, le=10, description="Number of filter iterations (isce3 method)"
     )
     filling_method: Literal["nearest", "linear"] = Field(
         "nearest", description="How gaps in the guide are filled before filtering"
@@ -58,9 +55,6 @@ class IonosphereFilterOptions(YamlModel):
     outlier_min_scale_rad: float = Field(
         0.1, gt=0, description="Lower limit on the robust deviation, in radians"
     )
-    std_floor_rad: float = Field(
-        0.05, gt=0, description="Lower limit on the phase uncertainty, in radians"
-    )
     donor_erosion_px: tuple[int, int] | None = Field(
         None,
         description=(
@@ -70,26 +64,6 @@ class IonosphereFilterOptions(YamlModel):
     )
     restore_mask: bool = Field(
         False, description="Set pixels outside the donors back to NaN after filtering"
-    )
-    max_fill_m: float = Field(
-        600.0, ge=0, description="Largest gap filled, in meters (donor_only method)"
-    )
-    min_support: float = Field(
-        0.10,
-        gt=0,
-        le=1,
-        description="Smallest donor weight accepted (donor_only method)",
-    )
-    robust_passes: int = Field(
-        1, ge=0, le=5, description="Robust reweighting passes (donor_only method)"
-    )
-    robust_cutoff: float = Field(
-        4.0, gt=0, description="Robust reweighting cutoff (donor_only method)"
-    )
-    robust_floor_rad: float = Field(
-        0.10,
-        gt=0,
-        description="Lower limit on the robust scale, in radians (donor_only method)",
     )
 
     @field_validator("sigma_m")
@@ -184,7 +158,9 @@ class IonosphereOptions(YamlModel):
             " settings"
         ),
     )
-    resume: bool = Field(True, description="Reuse completed stages in the output folder")
+    resume: bool = Field(
+        True, description="Reuse completed stages in the output folder"
+    )
     keep_intermediates: bool = Field(
         False, description="Keep prepared rasters and unwrapper scratch files"
     )

@@ -431,8 +431,7 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
     )
     if unwrap_method not in ("snaphu", "whirlwind"):
         raise ValueError(
-            f"main_diff supports snaphu or whirlwind; "
-            f"received {unwrap_method!r}"
+            f"main_diff supports snaphu or whirlwind; " f"received {unwrap_method!r}"
         )
 
     # Validate all inputs before starting either unwrap.
@@ -442,9 +441,7 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
     )
     missing = required.difference(prepared)
     if missing:
-        raise ValueError(
-            f"Missing prepared inputs for main_diff: {sorted(missing)}"
-        )
+        raise ValueError(f"Missing prepared inputs for main_diff: {sorted(missing)}")
 
     result = dict(prepared)
 
@@ -1323,22 +1320,20 @@ def _run_locked(
             trusted = footprint & np.isfinite(iono)
             # All filter controls come from the main algorithm parameters.
             # No calibrated inversion uncertainty is currently available, so
-            # ISCE3-style filtering uses equal initial precision explicitly.
+            # filtering uses equal precision.
             logger.info(
                 "%s: applying ionosphere filter %s with settings %s",
                 name,
                 options.filtering.method,
                 options.filtering.model_dump(mode="json"),
             )
-            result = apply_ionosphere_filter(
+            iono_filled = apply_ionosphere_filter(
                 iono,
                 donor_mask=trusted,
                 footprint=footprint,
                 pixel_size_m=(dy_m, dx_m),
                 options=options,
-                phase_std=None,
             )
-            iono_filled = result.phase
             logger.info(
                 "%s: ionosphere valid before=%d, after=%d",
                 name,
