@@ -980,25 +980,9 @@ def process_product(
             files.unwrapped,
             resample_alg="bilinear",
         )
-        iono_radians = io.load_gdal(warped_iono)
-        # The new path exports meters explicitly; preserve legacy conversion.
-        import rasterio
-
-        with rasterio.open(files.ionosphere) as iono_ds:
-            ionosphere_method = iono_ds.tags().get("ionosphere_method")
-            unit = (iono_ds.units[0] or "").strip().lower()
-
-        is_meters = unit in ("m", "meter", "meters", "metre", "metres")
-
-        if ionosphere_method in ("main_diff", "main_side") and not is_meters:
-            raise ValueError(
-                f"{ionosphere_method} correction must declare meters; got {unit!r}"
-            )
-
-        # Retain the existing conversion for other, non-meter inputs.
-        if not is_meters:
-            iono_radians *= wavelength / (4.0 * np.pi)
-        corrections["ionosphere"] = iono_radians
+        corrections["ionosphere"] = _ionosphere_to_meters(
+            files.ionosphere, io.load_gdal(warped_iono), wavelength
+        )
     else:
         logger.warning(
             "Missing ionospheric correction for %s. Creating empty layer.",
@@ -1143,6 +1127,25 @@ def create_displacement_products(
                 repeat(near_far_incidence_angles),
             )
         )
+
+
+def _ionosphere_to_meters(
+    iono_file: PathOrStr, iono: np.ndarray, wavelength: float
+) -> np.ndarray:
+    """Return a correction in meters, converting only if it declares otherwise.
+
+    Raises
+    ------
+    ValueError
+        If a main_diff correction does not declare meters.
+
+    """
+    units = (io.get_raster_units(iono_file) or "").strip().lower()
+    is_meters = units in ("m", "meter", "meters", "metre", "metres")
+    method = io.get_raster_metadata(iono_file).get("ionosphere_method")
+    if method == "main_diff" and not is_meters:
+        raise ValueError(f"main_diff correction must declare meters; got {units!r}")
+    return iono if is_meters else iono * (wavelength / (4.0 * np.pi))
 
 
 def _create_nodata_mask(

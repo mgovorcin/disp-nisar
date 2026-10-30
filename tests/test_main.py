@@ -92,3 +92,36 @@ def test_nodata_mask_keeps_valid_zeros(tmp_path):
     main._create_nodata_mask(image, output)
 
     np.testing.assert_array_equal(io.load_gdal(output), [[1, 1], [0, 1]])
+
+
+def _write_iono(path, units, metadata=None):
+    io.write_arr(
+        arr=np.ones((2, 2), dtype=np.float32), output_name=path, units=units
+    )
+    if metadata:
+        io.set_raster_metadata(path, metadata)
+    return path
+
+
+def test_correction_in_meters_is_not_scaled_again(tmp_path):
+    """The split-spectrum workflow writes meters, which were scaled by lambda/4pi.
+
+    Regression: that left corrections about 52 times too small at L-band.
+    """
+    iono = np.array([[0.5]], dtype=np.float32)
+    path = _write_iono(tmp_path / "iono.tif", "meters")
+    np.testing.assert_array_equal(main._ionosphere_to_meters(path, iono, 0.24), iono)
+
+
+def test_correction_in_radians_is_converted(tmp_path):
+    iono = np.array([[4 * np.pi]], dtype=np.float32)
+    path = _write_iono(tmp_path / "iono.tif", "radians")
+    np.testing.assert_allclose(main._ionosphere_to_meters(path, iono, 0.24), 0.24)
+
+
+def test_main_diff_correction_must_declare_meters(tmp_path):
+    path = _write_iono(
+        tmp_path / "iono.tif", "radians", {"ionosphere_method": "main_diff"}
+    )
+    with pytest.raises(ValueError, match="must declare meters"):
+        main._ionosphere_to_meters(path, np.ones((1, 1)), 0.24)
