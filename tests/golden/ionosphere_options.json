@@ -30,6 +30,7 @@
   "method": "main_side",
   "min_phasor_magnitude": 0.1,
   "min_valid_fraction": 1.0,
+  "n_workers": 1,
   "nlooks": 5.0,
   "resume": true,
   "similarity_threshold": 0.4,

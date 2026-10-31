@@ -225,6 +225,16 @@ class IonosphereOptions(YamlModel):
         le=1,
         description="Smallest donor fraction of a coarse block that counts as data",
     )
+    n_workers: int = Field(
+        1,
+        ge=1,
+        le=64,
+        description=(
+            "Processes for pair unwrapping, inversion windows, and per-output"
+            " filtering. Each holds its unwrapper's memory or one full B-grid array."
+            " Output does not depend on it"
+        ),
+    )
     resume: bool = Field(
         True, description="Reuse completed stages in the output folder"
     )

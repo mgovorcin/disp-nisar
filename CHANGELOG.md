@@ -14,6 +14,8 @@
   native unwrapping.
 - `main_diff` runs in forward mode on the common real-date pairs of A and B, with B
   phase-linked only on the real acquisitions.
+- `ionosphere_options.n_workers` runs `main_diff` pairs, inversion windows and
+  per-output filtering in parallel processes, with the same output.
 - `filtering.method: robust` smooths the `main_diff` screen with background clipping,
   empirical noise weights, a support floor and an 8 km near-range exclusion. The
   default filter is unchanged.

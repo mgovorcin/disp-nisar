@@ -5,6 +5,7 @@ chosen ionosphere and non-dispersive signal, so the correction must return that
 ionosphere. Only the unwrapper is replaced, since these phases do not wrap.
 """
 
+import shutil
 from datetime import datetime
 
 import h5py
@@ -15,9 +16,11 @@ from affine import Affine
 from dolphin.workflows.config import UnwrapOptions
 from rasterio.crs import CRS
 
+from disp_nisar.ionosphere._main_diff_io import Grid
 from disp_nisar.ionosphere.ionosphere_filter import apply_ionosphere_filter
 from disp_nisar.ionosphere.main_diff import (
     BandInputs,
+    _process_pairs,
     estimate_iono_main_diff,
     run_main_diff_estimation,
 )
@@ -350,6 +353,59 @@ def test_retuning_robust_settings_rebuilds_its_layers(stack, unwrap_calls, tmp_p
 
     assert len(unwrap_calls) == count
     assert np.count_nonzero(_read(band_path)) > narrow
+
+
+@pytest.mark.parametrize("method", ["guided", "robust"])
+def test_workers_give_the_same_output(stack, unwrap_calls, method):
+    """Pairs are reused here, since the fake unwrapper cannot reach spawned workers."""
+    options = _robust_options() if method == "robust" else _options()
+    before = [
+        _read(path) for path in run_main_diff_estimation(**stack, options=options)
+    ]
+    count = len(unwrap_calls)
+    shutil.rmtree(stack["out_dir"] / "timeseries")
+    shutil.rmtree(stack["out_dir"] / "corrections")
+
+    workers = options.model_copy(update={"n_workers": 2})
+    after = [_read(path) for path in run_main_diff_estimation(**stack, options=workers)]
+
+    assert len(unwrap_calls) == count
+    for first, second in zip(before, after, strict=True):
+        np.testing.assert_array_equal(first, second)
+
+
+def test_changing_workers_does_not_stop_a_resume(stack, unwrap_calls):
+    run_main_diff_estimation(**stack, options=_options())
+    count = len(unwrap_calls)
+    run_main_diff_estimation(**stack, options=_options(n_workers=3))
+    assert len(unwrap_calls) == count
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_process_pairs_keeps_input_order(tmp_path, workers):
+    tasks = []
+    for i in range(5):
+        folder = tmp_path / f"pair{i}"
+        folder.mkdir()
+        for name in ("A.unw.tif", "D.unw.tif", "donor.tif"):
+            (folder / name).write_bytes(b"")
+        tasks.append(({}, {}, folder))
+    grid = Grid.from_file(
+        _write(tmp_path / "grid.tif", np.zeros(SHAPE_B, "f4"), TRANSFORM_B)
+    )
+
+    jobs = _process_pairs(tasks, grid, None, _options(n_workers=workers))
+
+    assert [job["D_unw"].parent.name for job in jobs] == [f"pair{i}" for i in range(5)]
+
+
+def test_process_pairs_propagates_a_worker_failure(tmp_path):
+    grid = Grid.from_file(
+        _write(tmp_path / "grid.tif", np.zeros(SHAPE_B, "f4"), TRANSFORM_B)
+    )
+    tasks = [({}, {}, tmp_path / f"pair{i}") for i in range(2)]
+    with pytest.raises(KeyError, match="ifg_A"):
+        _process_pairs(tasks, grid, None, _options(n_workers=2))
 
 
 def test_resume_reuses_finished_work(stack, unwrap_calls):
