@@ -372,3 +372,12 @@ browse_image_vmin_vmax:
 # Number of output products to create in parallel.
 #   Type: integer.
 num_parallel_products: 4
+# Two-band ionosphere estimator, used when no GUNW files are given.
+ionosphere_options:
+  # main_side or main_diff.
+  method: main_side
+  # With main_side: stock or improved.
+  main_side_recipe: improved
+  # Smoothing kernel sigma and band-consistency block size, km.
+  main_side_sigma_km: 5.0
+  main_side_consistency_km: 10.0

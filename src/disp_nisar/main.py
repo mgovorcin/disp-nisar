@@ -379,18 +379,39 @@ def run(
         # Run split-spectrum ionosphere estimation for freq.B and freq.A
         # use runconfigs as input to run_ionosphere_estimation.
         f_A, f_B = get_center_frequencies(cfg_freqB.cslc_file_list[0])
-        out_paths.ionospheric_corrections = [
-            iono_path
-            for _, iono_path, _ in run_ionosphere_estimation(
-                ts_dir_A=cfg.work_directory / "timeseries",  # TODO: use out_paths
-                ts_dir_B=cfg_freqB.work_directory / "timeseries",
-                out_dir=cfg.work_directory / "ionosphere",
+        if ionosphere_options.main_side_recipe == "improved":
+            from disp_nisar.ionosphere.main_side_recipe import run_main_side_recipe
+
+            out_paths.ionospheric_corrections = run_main_side_recipe(
+                ts_dir_a=cfg.work_directory / "timeseries",
+                ts_dir_b=cfg_freqB.work_directory / "timeseries",
+                quality_a=(
+                    out_paths.stitched_temp_coh_file,
+                    out_paths.stitched_similarity_file,
+                ),
+                quality_b=(
+                    out_paths_freqB.stitched_temp_coh_file,
+                    out_paths_freqB.stitched_similarity_file,
+                ),
+                out_dir=cfg.work_directory / "ionosphere" / "ionosphere",
                 output_timeseries_paths=out_paths.timeseries_paths,
-                f_A=f_A,
-                f_B=f_B,
-                smooth_sigma=5.0,  # expose smoothing as a parameter.
+                f_a=f_A,
+                f_b=f_B,
+                options=ionosphere_options,
             )
-        ]
+        else:
+            out_paths.ionospheric_corrections = [
+                iono_path
+                for _, iono_path, _ in run_ionosphere_estimation(
+                    ts_dir_A=cfg.work_directory / "timeseries",  # TODO: use out_paths
+                    ts_dir_B=cfg_freqB.work_directory / "timeseries",
+                    out_dir=cfg.work_directory / "ionosphere",
+                    output_timeseries_paths=out_paths.timeseries_paths,
+                    f_A=f_A,
+                    f_B=f_B,
+                    smooth_sigma=5.0,  # expose smoothing as a parameter.
+                )
+            ]
     else:
         # Read the ionosphere phase screen for timeseries from GUNW files
         out_paths.ionospheric_corrections = get_ionosphere_phase_screen(
@@ -1022,10 +1043,11 @@ def process_product(
         import rasterio
 
         with rasterio.open(files.ionosphere) as iono_ds:
-            is_main_diff = iono_ds.tags().get("ionosphere_method") == "main_diff"
-            if is_main_diff and iono_ds.units[0] != "meters":
-                raise ValueError("main_diff correction must declare meters")
-        if not is_main_diff:
+            method = iono_ds.tags().get("ionosphere_method")
+            in_meters = method in ("main_diff", "main_side_recipe")
+            if in_meters and iono_ds.units[0] != "meters":
+                raise ValueError(f"{method} correction must declare meters")
+        if not in_meters:
             iono_radians *= wavelength / (4.0 * np.pi)
         corrections["ionosphere"] = iono_radians
     else:

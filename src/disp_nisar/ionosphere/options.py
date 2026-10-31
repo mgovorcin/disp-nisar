@@ -25,5 +25,23 @@ class IonosphereOptions(BaseModel):
             " settings."
         ),
     )
+    main_side_recipe: Literal["stock", "improved"] = Field(
+        "stock",
+        description=(
+            "With method main_side: 'stock' keeps the original pixel-referenced 150 m"
+            " estimate; 'improved' is the area-referenced, masked, consistency-checked"
+            " estimate smoothed at the ionosphere's scale."
+        ),
+    )
+    main_side_sigma_km: float = Field(
+        5.0, gt=0, description="Improved main_side: smoothing kernel sigma."
+    )
+    main_side_consistency_km: float = Field(
+        10.0,
+        gt=0,
+        description=(
+            "Improved main_side: block size of the band-consistency background."
+        ),
+    )
     resume: bool = True
     keep_intermediates: bool = False
