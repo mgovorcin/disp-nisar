@@ -71,6 +71,31 @@ def run(
     _assert_compressed_slcs_consecutive(cfg.cslc_file_list)
     _warn_date_gaps(cfg.cslc_file_list)
 
+    # Screen the GSLC dates before anything reads the stack (split-spectrum only)
+    algorithm_parameters = AlgorithmParameters.from_yaml(
+        pge_runconfig.dynamic_ancillary_file_group.algorithm_parameters_file
+    )
+    if (
+        algorithm_parameters.gslc_prescreen
+        and not pge_runconfig.dynamic_ancillary_file_group.gunw_files
+    ):
+        flags = _prescreen_gslc_epochs(
+            cfg.cslc_file_list,
+            out_file=cfg.work_directory / "gslc_prescreen.json",
+            row_stride=algorithm_parameters.gslc_prescreen_row_stride,
+            n_workers=max(1, cfg.worker_settings.n_parallel_bursts),
+        )
+        if algorithm_parameters.gslc_prescreen_drop_line_flags:
+            _drop_flagged_epochs(
+                cfg,
+                pge_runconfig,
+                flags,
+                keep_newest=(
+                    pge_runconfig.primary_executable.product_type
+                    == "DISP_NISAR_FORWARD"
+                ),
+            )
+
     # Handle forward mode - get second to last date for re-referencing
     gslc_dates = [get_dates(f)[0] for f in cfg.cslc_file_list]
     sorted_dates = sorted([d for d in gslc_dates if d is not None])
@@ -695,6 +720,102 @@ def _build_frame_template(
     ds.FlushCache()
     ds = None
     return output_path
+
+
+def _prescreen_gslc_epochs(
+    input_file_list: Sequence[Path],
+    out_file: Path,
+    row_stride: int = 3,
+    n_workers: int = 1,
+    looks_y: int = 64,
+) -> list:
+    """Score the real GSLC dates before phase linking and report flagged epochs.
+
+    Compressed SLCs are skipped. Report only: the flags are logged as warnings and
+    written with all scores to `out_file`; the stack is not changed.
+    """
+    import json
+
+    from disp_nisar.ionosphere.gslc_prescreen import prescreen_dates
+
+    real = [
+        Path(f) for f in input_file_list if "compressed" not in Path(f).name.lower()
+    ]
+    gslc_by_date: dict[str, str | Path] = {
+        get_dates(f)[0].strftime("%Y%m%d"): f for f in real
+    }
+    if len(gslc_by_date) < 3:
+        logger.info("GSLC pre-screen needs >= 3 real dates; skipping")
+        return []
+    logger.info(
+        f"GSLC pre-screen of {len(gslc_by_date)} dates (row stride {row_stride})"
+    )
+    scores, flags = prescreen_dates(
+        gslc_by_date, looks_y=looks_y, row_stride=row_stride, n_workers=n_workers
+    )
+    for f in flags:
+        logger.warning(f"GSLC pre-screen flag: {f.epoch} {f.reason} {f.statistic:.2f}")
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(
+        json.dumps(
+            {
+                "scores": scores,
+                "flags": [
+                    {"epoch": f.epoch, "reason": f.reason, "statistic": f.statistic}
+                    for f in flags
+                ],
+            },
+            indent=2,
+            default=float,
+        )
+    )
+    return flags
+
+
+def _drop_flagged_epochs(
+    cfg: DisplacementWorkflow,
+    pge_runconfig: RunConfig,
+    flags: Sequence,
+    keep_newest: bool = False,
+    min_dates: int = 3,
+) -> list[str]:
+    """Remove GSLC dates with a line flag from both bands' input lists.
+
+    Only `gslc_line` flags drop a date; decorrelation flags stay report-only. The
+    freqA list (`cfg.cslc_file_list`) and the list the freqB workflow is built from
+    (`input_file_group.gslc_file_list`) are filtered alike. With `keep_newest`
+    (forward mode) a flagged newest date is kept and logged as an error, since it is
+    the date the run publishes. Nothing is dropped if fewer than `min_dates` real
+    dates would remain. Returns the dropped dates.
+    """
+
+    def date_of(f) -> str | None:
+        if "compressed" in Path(f).name.lower():
+            return None
+        return get_dates(f)[0].strftime("%Y%m%d")
+
+    real = sorted({d for f in cfg.cslc_file_list if (d := date_of(f)) is not None})
+    drop = {f.epoch for f in flags if f.reason == "gslc_line"} & set(real)
+    if keep_newest and real and real[-1] in drop:
+        logger.error(
+            f"GSLC pre-screen flags the newest date {real[-1]} (gslc_line); kept, as"
+            " forward mode publishes it"
+        )
+        drop.discard(real[-1])
+    if not drop:
+        return []
+    if len(real) - len(drop) < min_dates:
+        logger.warning(
+            f"GSLC pre-screen: dropping {sorted(drop)} would leave fewer than"
+            f" {min_dates} dates; keeping them"
+        )
+        return []
+    cfg.cslc_file_list = [f for f in cfg.cslc_file_list if date_of(f) not in drop]
+    group = pge_runconfig.input_file_group
+    group.gslc_file_list = [f for f in group.gslc_file_list if date_of(f) not in drop]
+    for d in sorted(drop):
+        logger.warning(f"GSLC pre-screen: dropped {d} (gslc_line) before phase linking")
+    return sorted(drop)
 
 
 def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:

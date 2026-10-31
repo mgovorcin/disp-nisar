@@ -337,6 +337,33 @@ class AlgorithmParameters(YamlModel):
         ),
     )
 
+    gslc_prescreen: bool = Field(
+        False,
+        description=(
+            "Before phase linking, score every real GSLC date for two-band line"
+            " artefacts and decorrelation (`ionosphere.gslc_prescreen`). Report only:"
+            " flags are logged and written to `gslc_prescreen.json` in the work"
+            " directory; no date is dropped. Used with split-spectrum ionosphere."
+        ),
+    )
+    gslc_prescreen_drop_line_flags: bool = Field(
+        False,
+        description=(
+            "With `gslc_prescreen`, drop dates flagged as line artefacts from both"
+            " bands' input lists before phase linking. Decorrelation flags stay report"
+            " only; in forward mode a flagged newest date is kept and logged as an"
+            " error."
+        ),
+    )
+    gslc_prescreen_row_stride: int = Field(
+        3,
+        ge=1,
+        description=(
+            "Read every n-th row window of the GSLCs in the pre-screen (3 scores the"
+            " known artefacts as well as a full read, about 3x faster)."
+        ),
+    )
+
     model_config = ConfigDict(extra="forbid")
 
     def model_post_init(self, context: Any) -> None:  # noqa: ARG002, D102
