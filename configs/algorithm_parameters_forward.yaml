@@ -372,3 +372,14 @@ browse_image_vmin_vmax:
 # Number of output products to create in parallel.
 #   Type: integer.
 num_parallel_products: 4
+# Two-band ionosphere estimator, used when no GUNW files are given.
+ionosphere_options:
+  # main_side or main_diff.
+  method: main_diff
+  # Unwrap the double difference D at this many looks of the B grid (400 m).
+  d_looks: 10
+  # Robust smoothing: 2 km noise-weighted kernel with the near-range band excluded.
+  smoothing: robust
+  near_range_exclude_km: 8.0
+  # Parallel workers for pairs, inversion and export.
+  n_workers: 8

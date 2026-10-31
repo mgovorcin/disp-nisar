@@ -21,6 +21,7 @@ import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
+from rasterio.warp import reproject
 from rasterio.windows import Window
 
 from ._main_diff_io import (
@@ -202,6 +203,86 @@ def _prepare_pair(inputs, masks, target, folder, options):
     return outputs
 
 
+def _process_pair(inputs, masks, folder, target, unwrap_options, options):
+    """Prepare and unwrap one pair, publishing its files only once it completed.
+
+    Returns (ready, status).
+    """
+    import shutil
+
+    folder.mkdir(parents=True, exist_ok=True)
+    # These are the files consumed by reference selection and inversion.
+    ready = {
+        "A_unw": folder / "A.unw.tif",
+        "D_unw": folder / "D.unw.tif",
+        "donor": folder / "donor.tif",
+    }
+    if options.resume and all(p.is_file() for p in ready.values()):
+        return ready, "reused"
+    # One fixed working directory, not a new attempt directory each time.
+    work = folder / "_partial"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir()
+    generated = _unwrap_pair(
+        _prepare_pair(inputs, masks, target, work, options),
+        work,
+        unwrap_options,
+        options,
+    )
+    ready = {}
+    for key_name, path in generated.items():
+        destination = folder / path.name
+        path.replace(destination)
+        ready[key_name] = destination
+    if not options.keep_intermediates:
+        shutil.rmtree(work)
+    return ready, "processed"
+
+
+def _process_pairs(tasks, target, unwrap_options, options):
+    """Run `_process_pair` over all pairs, in `options.n_workers` spawned processes.
+
+    Results keep the input order, so reference selection and inversion see the same job
+    list whatever the worker count. Spawn (not fork) keeps GDAL handles out of the
+    children.
+    """
+    n = len(tasks)
+    if options.n_workers <= 1 or n <= 1:
+        jobs = []
+        for i, (name, inputs, masks, folder) in enumerate(tasks, 1):
+            ready, status = _process_pair(
+                inputs, masks, folder, target, unwrap_options, options
+            )
+            logger.info("[%d/%d] %s: %s", i, n, name, status)
+            jobs.append(ready)
+        return jobs
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    jobs = [None] * n
+    with ProcessPoolExecutor(
+        min(options.n_workers, n), mp_context=mp.get_context("spawn")
+    ) as ex:
+        futures = {
+            ex.submit(
+                _process_pair,
+                inputs,
+                masks,
+                folder,
+                target,
+                unwrap_options,
+                options,
+            ): k
+            for k, (name, inputs, masks, folder) in enumerate(tasks)
+        }
+        for done, fut in enumerate(as_completed(futures), 1):
+            k = futures[fut]
+            jobs[k], status = fut.result()
+            logger.info("[%d/%d] %s: %s", done, n, tasks[k][0], status)
+    return jobs
+
+
 def _unwrap_pair(prepared, folder, unwrap_options, options):
     from dolphin.unwrap import unwrap
 
@@ -212,6 +293,19 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
         raise ValueError(f"main_diff supports snaphu or whirlwind; received {method!r}")
     result = dict(prepared)
     for band in ("A", "D"):
+        published = folder.parent / f"{band}.unw.tif"
+        published_cc = folder.parent / f"{band}.unw.conncomp.tif"
+        if options.resume and published.is_file() and published_cc.is_file():
+            # Per-band resume: a band already unwrapped for this pair is reused (the
+            # pair-level resume above needs all three published files; this lets a
+            # D-only rerun keep A).
+            import shutil
+
+            for src in (published, published_cc):
+                shutil.copy2(src, folder / src.name)
+            result[f"{band}_unw"] = folder / published.name
+            result[f"{band}_cc"] = folder / published_cc.name
+            continue
         cfg = unwrap_options.model_copy(deep=True)
         if method == "whirlwind":
             # Use the existing GSLC/quality-aware Dolphin interpolation.
@@ -228,6 +322,12 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
         cfg.preprocess_options.interpolation_similarity_threshold = (
             options.similarity_threshold
         )
+        if band == "D" and options.d_looks > 1:
+            from .dlooks import unwrap_d_coarse
+
+            unw, cc = unwrap_d_coarse(prepared, folder, cfg, options, unwrap)
+            result[f"{band}_unw"], result[f"{band}_cc"] = Path(unw), Path(cc)
+            continue
         unw, cc = unwrap(
             ifg_filename=prepared[f"{band}_ifg"],
             corr_filename=prepared[f"{band}_cor"],
@@ -307,9 +407,58 @@ def select_common_reference(
     return best[1], best[2]
 
 
+def _invert_window(win, jobs, design, offsets, f_a, f_b):
+    """Read one window of every pair and invert it (A, D and the ionosphere series).
+
+    Opens its own readers so it can run in a worker process. GDAL's block cache is
+    capped: its default (5 % of RAM per process) times the worker count can exceed the
+    machine.
+    """
+    with ExitStack() as stack:
+        stack.enter_context(rasterio.Env(GDAL_CACHEMAX=256))
+        readers = [
+            {
+                n: stack.enter_context(rasterio.open(j[n]))
+                for n in ("donor", "A_unw", "D_unw")
+            }
+            for j in jobs
+        ]
+        valid = np.stack([read_window(r["donor"], win) == 1 for r in readers])
+        phases = {}
+        for band in ("A", "D"):
+            phases[band] = np.stack(
+                [read_window(r[f"{band}_unw"], win) for r in readers]
+            )
+            phases[band] -= offsets[band][:, None, None]
+    a, d = invert_common_phase_block(phases["A"], phases["D"], design, valid)
+    iono = estimate_iono_main_diff(f_a, f_b, a, d)
+    zero = np.where(np.isfinite(iono).all(axis=0), 0, np.nan)[None].astype(np.float32)
+    return (
+        win,
+        np.concatenate((zero, iono)),
+        np.concatenate((zero, d.astype(np.float32))),
+    )
+
+
 def _invert_jobs(
-    jobs, pairs, grid, reference, f_a, f_b, outputs, output_pairs, block_size
+    jobs,
+    pairs,
+    grid,
+    reference,
+    f_a,
+    f_b,
+    outputs,
+    output_pairs,
+    block_size,
+    d_outputs=None,
+    n_workers=1,
 ):
+    """Invert the A and D pair networks and write the per-output-pair ionosphere.
+
+    The ionosphere is in radians at f_A. When `d_outputs` is given (one path per output
+    pair), the per-epoch inverted D is written as well: the band difference per epoch,
+    which is what the epoch line test (epoch_qc) runs on in the main_diff path.
+    """
     dates = sorted({d for pair in pairs for d in pair})
     idx = {d: i for i, d in enumerate(dates)}
     design = build_design_matrix(pairs, dates)
@@ -321,13 +470,6 @@ def _invert_jobs(
     }
 
     with ExitStack() as stack:
-        readers = [
-            {
-                n: stack.enter_context(rasterio.open(j[n]))
-                for n in ("donor", "A_unw", "D_unw")
-            }
-            for j in jobs
-        ]
         writers = [
             stack.enter_context(
                 rasterio.open(p, "w", **grid.profile("float32", np.nan))
@@ -340,22 +482,48 @@ def _invert_jobs(
                 phase_convention="dolphin_ifg_ref_times_conj_sec",
                 ionosphere_method="main_diff",
             )
-        for win in windows(grid, block_size):
-            valid = np.stack([read_window(r["donor"], win) == 1 for r in readers])
-            phases = {}
-            for band in ("A", "D"):
-                phases[band] = np.stack(
-                    [read_window(r[f"{band}_unw"], win) for r in readers]
+        d_writers = []
+        if d_outputs is not None:
+            d_writers = [
+                stack.enter_context(
+                    rasterio.open(p, "w", **grid.profile("float32", np.nan))
                 )
-                phases[band] -= offsets[band][:, None, None]
-            a, d = invert_common_phase_block(phases["A"], phases["D"], design, valid)
-            iono = estimate_iono_main_diff(f_a, f_b, a, d)
-            zero = np.where(np.isfinite(iono).all(axis=0), 0, np.nan)[None].astype(
-                np.float32
-            )
-            series = np.concatenate((zero, iono))
+                for p in d_outputs
+            ]
+            for dst in d_writers:
+                dst.set_band_unit(1, "radians")
+                dst.update_tags(
+                    phase_convention="dolphin_ifg_ref_times_conj_sec",
+                    content="per-epoch A minus B phase",
+                )
+
+        def write(win, series, series_d):
             for dst, (ref, sec) in zip(writers, output_pairs, strict=True):
                 dst.write(series[idx[sec]] - series[idx[ref]], 1, window=win)
+            if d_writers:
+                for dst, (ref, sec) in zip(d_writers, output_pairs, strict=True):
+                    dst.write(series_d[idx[sec]] - series_d[idx[ref]], 1, window=win)
+
+        wins = list(windows(grid, block_size))
+        if n_workers <= 1:
+            for win in wins:
+                write(*_invert_window(win, jobs, design, offsets, f_a, f_b))
+        else:
+            # Windows are independent: solve them in spawned workers, write in this
+            # process (one writer per raster). Output is identical to the sequential
+            # path.
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+
+            with ProcessPoolExecutor(
+                n_workers, mp_context=mp.get_context("spawn")
+            ) as ex:
+                futures = [
+                    ex.submit(_invert_window, w, jobs, design, offsets, f_a, f_b)
+                    for w in wins
+                ]
+                for fut in as_completed(futures):
+                    write(*fut.result())
 
 
 def _export_correction(source, match, output, f_a, reference_a, block_size):
@@ -398,6 +566,132 @@ def _export_correction(source, match, output, f_a, reference_a, block_size):
                     1,
                     window=win,
                 )
+
+
+def _fill_and_export(
+    name,
+    src,
+    match,
+    output_path,
+    timeseries_dir,
+    pair_masks,
+    target,
+    fill_settings,
+    f_a,
+    reference_a,
+    options,
+    near_band_path=None,
+    noise_path=None,
+):
+    """Fill one output pair's raw ionosphere and export it as the product correction.
+
+    Independent per output, so it can run in a worker process; `pair_masks` holds the
+    four (date, band) inside-mask paths; the robust smoothing reads the near-range band
+    and the empirical noise from `near_band_path` and `noise_path`. GDAL's block cache
+    is capped so several workers fit in memory.
+    """
+    with rasterio.Env(GDAL_CACHEMAX=256):
+        filled_path = timeseries_dir / f"{name}_iono_B_filled.rad.tif"
+        if options.resume and filled_path.is_file():
+            logger.info("%s: reusing filled ionosphere", name)
+        else:
+            with rasterio.open(src) as ds:
+                iono = ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+            footprint = np.ones(iono.shape, dtype=bool)
+            for mask_path in pair_masks:
+                with rasterio.open(mask_path) as mask_ds:
+                    with WarpedVRT(
+                        mask_ds,
+                        crs=target.crs,
+                        transform=target.transform,
+                        width=target.width,
+                        height=target.height,
+                        resampling=Resampling.average,
+                        src_nodata=255,
+                        nodata=255,
+                        dtype="float32",
+                    ) as mask_vrt:
+                        inside = mask_vrt.read(1, masked=True).filled(0)
+                footprint &= inside > 0
+            trusted = footprint & np.isfinite(iono)
+            if not trusted.any():
+                raise ValueError(f"{name}: no valid ionosphere samples for filling")
+
+            # Existing helper erodes invalid stripes along columns. Check donors
+            # before calling it: a Gaussian fill with no donors is undefined.
+            from scipy.ndimage import maximum_filter1d
+
+            radius = fill_settings["mask_erosion_px"]
+            eroded_donors = footprint & ~maximum_filter1d(
+                (~trusted).astype(np.uint8),
+                size=2 * radius + 1,
+                axis=1,
+            ).astype(bool)
+            if not eroded_donors.any():
+                raise ValueError(f"{name}: no donors remain after mask erosion")
+
+            if options.smoothing == "robust":
+                from .smoothing import noise_weights, smooth_screen
+
+                noise = noise_w = None
+                if noise_path is not None:
+                    with rasterio.open(noise_path) as ds:
+                        noise = ds.read(1)
+                    noise_w = noise_weights(noise, np.isfinite(noise))
+                iono_filled, quality_mask, _ = smooth_screen(
+                    iono,
+                    trusted,
+                    footprint,
+                    noise_w,
+                    options.smooth_sigma_px,
+                    min_support=options.smooth_min_support,
+                    fallback_sigma_px=options.smooth_fallback_sigma_px,
+                    clip_max_dev=(2 * np.pi * options.background_clip_cycles) or None,
+                    clip_block_px=options.background_block_px,
+                    noise=noise,
+                    exclude_noise_factor=options.exclude_noise_factor or None,
+                    exclude_mask=(
+                        np.load(near_band_path) if near_band_path is not None else None
+                    ),
+                )
+            else:
+                iono_filled, quality_mask = apply_similarity_mask_and_fill(
+                    iono=iono,
+                    sim_mask=trusted,
+                    existing_mask=footprint,
+                    **fill_settings,
+                )
+            logger.info(
+                "%s: ionosphere valid before=%d, after=%d",
+                name,
+                np.count_nonzero(trusted),
+                np.count_nonzero(np.isfinite(iono_filled)),
+            )
+            temporary_filled = filled_path.with_name(f"{filled_path.stem}.partial.tif")
+            with rasterio.open(
+                temporary_filled,
+                "w",
+                **target.profile("float32", np.nan),
+            ) as dst:
+                dst.write(iono_filled.astype(np.float32), 1)
+                dst.set_band_unit(1, "radians")
+                dst.update_tags(
+                    ionosphere_method="main_diff",
+                    phase_convention="dolphin_ifg_ref_times_conj_sec",
+                    smoothing=options.smoothing,
+                )
+            temporary_filled.replace(filled_path)
+
+        temporary_output = output_path.with_name(f"{output_path.stem}.partial.tif")
+        _export_correction(
+            filled_path,
+            Path(match),
+            temporary_output,
+            f_a,
+            reference_a,
+            options.block_size,
+        )
+        temporary_output.replace(output_path)
 
 
 def run_main_diff_estimation(
@@ -498,13 +792,25 @@ def _run_locked(
         "ifg_B": _index(band_b.interferograms),
         "cor_B": _index(band_b.correlations),
     }
-    pairs = sorted(maps["ifg_A"])
-    if not pairs or any(set(m) != set(pairs) for m in maps.values()):
-        raise ValueError("A/B IFG and correlation networks must match exactly")
+    for b in ("A", "B"):
+        if set(maps[f"ifg_{b}"]) != set(maps[f"cor_{b}"]):
+            raise ValueError(f"Band {b}: interferogram and correlation networks differ")
     output_pairs = [_date_pair(Path(p)) for p in products]
+    from .network import select_pairs
+
+    # Forward mode: A carries compressed-reference pairs that B lacks and compressed
+    # epochs have no raw GSLC mask. D is estimated on the common real-date network
+    # (T6.1, Option A).
+    selection = select_pairs(
+        maps["ifg_A"],
+        maps["ifg_B"],
+        gslc_by_date,
+        output_pairs,
+        strict=options.strict_network,
+    )
+    pairs = selection.pairs
+    logger.info("Two-band network: %s", selection.summary)
     dates = sorted({d for pair in pairs for d in pair})
-    if any(d not in dates for pair in output_pairs for d in pair):
-        raise ValueError("Output requests an epoch absent from the common network")
     if missing := set(dates) - set(gslc_by_date):
         raise ValueError(f"Missing raw GSLC masks for acquisitions: {missing}")
     grids = {b: Grid.from_file(maps[f"ifg_{b}"][pairs[0]]) for b in ("A", "B")}
@@ -560,8 +866,8 @@ def _run_locked(
         if need_masks
         else {}
     )
-    jobs = []
-    for i, pair in enumerate([] if inversion_ready else pairs, 1):
+    tasks = []
+    for pair in [] if inversion_ready else pairs:
         name = "_".join(d.strftime("%Y%m%d") for d in pair)
         inputs = {n: m[pair] for n, m in maps.items()}
         inputs.update(sim_A=Path(band_a.similarity), sim_B=Path(band_b.similarity))
@@ -571,48 +877,8 @@ def _run_locked(
             for role, d in zip(("ref", "sec"), pair, strict=True)
             for kind in ("valid", "inside")
         }
-        folder = out_dir / "pairs" / name
-        folder.mkdir(parents=True, exist_ok=True)
-
-        # These are the files consumed by reference selection and inversion.
-        ready = {
-            "A_unw": folder / "A.unw.tif",
-            "D_unw": folder / "D.unw.tif",
-            "donor": folder / "donor.tif",
-        }
-
-        if options.resume and all(p.is_file() for p in ready.values()):
-            status = "reused"
-        else:
-            # One fixed working directory, not a new attempt directory each time.
-            import shutil
-
-            work = folder / "_partial"
-            if work.exists():
-                shutil.rmtree(work)
-            work.mkdir()
-
-            generated = _unwrap_pair(
-                _prepare_pair(inputs, masks, target, work, options),
-                work,
-                unwrap_options,
-                options,
-            )
-
-            # Publish only after the pair processing completed successfully.
-            ready = {}
-            for key_name, path in generated.items():
-                destination = folder / path.name
-                path.replace(destination)
-                ready[key_name] = destination
-
-            if not options.keep_intermediates:
-                shutil.rmtree(work)
-
-            status = "processed"
-
-        logger.info("[%d/%d] %s: %s", i, len(pairs), name, status)
-        jobs.append(ready)
+        tasks.append((name, inputs, masks, out_dir / "pairs" / name))
+    jobs = _process_pairs(tasks, target, unwrap_options, options)
 
     fill_settings = {
         "fill_method": "gaussian",
@@ -651,11 +917,86 @@ def _run_locked(
             temporary,
             output_pairs,
             options.block_size,
+            n_workers=options.n_workers,
         )
         for source, destination in zip(temporary, intermediate, strict=True):
             source.replace(destination)
 
+    near_band_path = None
+    if options.smoothing == "robust" and options.near_range_exclude_km > 0:
+        # the incidence raster (static layers) is optional input; without it the band
+        # cannot be located
+        inc_path = getattr(options, "incidence_path", None) or (
+            out_dir / "incidence.tif"
+        )
+        if Path(inc_path).is_file():
+            from .smoothing import near_range_band
+
+            inc = np.full((target.height, target.width), np.nan, "float32")
+            with rasterio.open(inc_path) as src:
+                reproject(
+                    src.read(1).astype("float32"),
+                    inc,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    src_nodata=src.nodata,
+                    dst_transform=target.transform,
+                    dst_crs=target.crs,
+                    dst_nodata=np.nan,
+                    resampling=Resampling.average,
+                )
+            foot = np.zeros((target.height, target.width), bool)
+            for p in intermediate:
+                with rasterio.open(p) as ds:
+                    foot |= np.isfinite(
+                        ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+                    )
+            near_band = near_range_band(
+                foot, inc, abs(target.transform.a), options.near_range_exclude_km
+            )
+            logger.info(
+                "near-range band of %.1f km excluded from the screen: %.1f %% of the"
+                " footprint",
+                options.near_range_exclude_km,
+                100 * near_band[foot].mean(),
+            )
+            near_band_path = correction_dir / "near_range_band.npy"
+            np.save(near_band_path, near_band)
+        else:
+            logger.warning(
+                "near_range_exclude_km set but no incidence raster at %s; band not"
+                " excluded",
+                inc_path,
+            )
+    noise_path = None
+    if options.smoothing == "robust" and options.noise_weights:
+        from .smoothing import empirical_noise
+
+        noise_path = correction_dir / "ionosphere_noise.rad.tif"
+        if not (options.resume and noise_path.is_file()):
+
+            def _epochs():
+                for p in intermediate:
+                    with rasterio.open(p) as ds:
+                        yield ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+
+            any_ok = np.zeros((target.height, target.width), bool)
+            for p in intermediate:
+                with rasterio.open(p) as ds:
+                    any_ok |= np.isfinite(
+                        ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+                    )
+            noise = empirical_noise(_epochs(), any_ok, options.smooth_fallback_sigma_px)
+            with rasterio.open(
+                noise_path, "w", **target.profile("float32", np.nan)
+            ) as dst:
+                dst.write(noise, 1)
+                dst.set_band_unit(1, "radians")
+                dst.update_tags(
+                    description="RMS over epochs of the screen minus its 10 km smooth"
+                )
     outputs = []
+    tasks = []
     for i, (src, match, name) in enumerate(
         zip(intermediate, products, names, strict=True)
     ):
@@ -664,81 +1005,43 @@ def _run_locked(
         if options.resume and output_path.is_file():
             logger.info("%s: reusing correction", name)
             continue
-
-        filled_path = timeseries_dir / f"{name}_iono_B_filled.rad.tif"
-        if options.resume and filled_path.is_file():
-            logger.info("%s: reusing filled ionosphere", name)
-        else:
-            with rasterio.open(src) as ds:
-                iono = ds.read(1, masked=True).astype(np.float32).filled(np.nan)
-            footprint = np.ones(iono.shape, dtype=bool)
-            for date in output_pairs[i]:
-                for band in ("A", "B"):
-                    with rasterio.open(cached_masks[date, band]["inside"]) as mask_ds:
-                        with WarpedVRT(
-                            mask_ds,
-                            crs=target.crs,
-                            transform=target.transform,
-                            width=target.width,
-                            height=target.height,
-                            resampling=Resampling.average,
-                            src_nodata=255,
-                            nodata=255,
-                            dtype="float32",
-                        ) as mask_vrt:
-                            inside = mask_vrt.read(1, masked=True).filled(0)
-                    footprint &= inside > 0
-            trusted = footprint & np.isfinite(iono)
-            if not trusted.any():
-                raise ValueError(f"{name}: no valid ionosphere samples for filling")
-
-            # Existing helper erodes invalid stripes along columns. Check donors
-            # before calling it: a Gaussian fill with no donors is undefined.
-            from scipy.ndimage import maximum_filter1d
-
-            radius = fill_settings["mask_erosion_px"]
-            eroded_donors = footprint & ~maximum_filter1d(
-                (~trusted).astype(np.uint8),
-                size=2 * radius + 1,
-                axis=1,
-            ).astype(bool)
-            if not eroded_donors.any():
-                raise ValueError(f"{name}: no donors remain after mask erosion")
-
-            iono_filled, quality_mask = apply_similarity_mask_and_fill(
-                iono=iono,
-                sim_mask=trusted,
-                existing_mask=footprint,
-                **fill_settings,
-            )
-            logger.info(
-                "%s: ionosphere valid before=%d, after=%d",
-                name,
-                np.count_nonzero(trusted),
-                np.count_nonzero(np.isfinite(iono_filled)),
-            )
-            temporary_filled = filled_path.with_name(f"{filled_path.stem}.partial.tif")
-            with rasterio.open(
-                temporary_filled,
-                "w",
-                **target.profile("float32", np.nan),
-            ) as dst:
-                dst.write(iono_filled.astype(np.float32), 1)
-                dst.set_band_unit(1, "radians")
-                dst.update_tags(
-                    ionosphere_method="main_diff",
-                    phase_convention="dolphin_ifg_ref_times_conj_sec",
-                )
-            temporary_filled.replace(filled_path)
-
-        temporary_output = output_path.with_name(f"{output_path.stem}.partial.tif")
-        _export_correction(
-            filled_path,
-            Path(match),
-            temporary_output,
-            f_a,
-            reference_a,
-            options.block_size,
+        pair_masks = (
+            [
+                cached_masks[date, band]["inside"]
+                for date in output_pairs[i]
+                for band in ("A", "B")
+            ]
+            if cached_masks
+            else []
         )
-        temporary_output.replace(output_path)
+        tasks.append(
+            (
+                name,
+                src,
+                match,
+                output_path,
+                timeseries_dir,
+                pair_masks,
+                target,
+                fill_settings,
+                f_a,
+                reference_a,
+                options,
+                near_band_path,
+                noise_path,
+            )
+        )
+    if options.n_workers <= 1 or len(tasks) <= 1:
+        for t in tasks:
+            _fill_and_export(*t)
+    else:
+        # Outputs are independent: fill and export them in spawned workers.
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(
+            min(options.n_workers, len(tasks)), mp_context=mp.get_context("spawn")
+        ) as ex:
+            for _ in ex.map(_fill_and_export, *zip(*tasks)):
+                pass
     return outputs

@@ -1,6 +1,7 @@
 """DISP-specific settings for optional main-differential estimation."""
 
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +24,95 @@ class IonosphereOptions(BaseModel):
         description=(
             "Effective looks for the correlation proxy; validate for the chosen PL"
             " settings."
+        ),
+    )
+    d_looks: int = Field(
+        1,
+        ge=1,
+        le=64,
+        description=(
+            "Unwrap the double-difference D on a grid this many times coarser than the"
+            " B grid (phasor average over donor pixels), then upsample. 1 = native."
+        ),
+    )
+    d_looks_min_fraction: float = Field(
+        0.1,
+        gt=0,
+        le=1,
+        description=(
+            "Smallest donor fraction of a coarse block that still counts as a D"
+            " observation."
+        ),
+    )
+    n_workers: int = Field(
+        1,
+        ge=1,
+        le=64,
+        description=(
+            "Pairs prepared and unwrapped in parallel processes (each holds one block"
+            " of every input plus its unwrapper's memory); the same count solves the"
+            " inversion windows in parallel. 1 = sequential, the original behaviour."
+        ),
+    )
+    smoothing: Literal["legacy", "robust"] = "legacy"
+    smooth_sigma_px: float = Field(
+        50.0,
+        gt=0,
+        description="Screen-scale kernel sigma on the B grid (50 px = 2 km at 40 m).",
+    )
+    smooth_min_support: float = Field(
+        0.2,
+        gt=0,
+        le=1,
+        description="Kernel support below which the coarse kernel is used.",
+    )
+    smooth_fallback_sigma_px: float = Field(
+        250.0, gt=0, description="Coarse kernel sigma (250 px = 10 km at 40 m)."
+    )
+    noise_weights: bool = Field(
+        True, description="Weight the smoothing by 1/(empirical per-pixel noise)^2."
+    )
+    incidence_path: Optional[Path] = Field(
+        None,
+        description=(
+            "Incidence-angle raster (static layers) used to locate the near-range band;"
+            " set by the workflow."
+        ),
+    )
+    near_range_exclude_km: float = Field(
+        8.0,
+        ge=0,
+        description=(
+            "Width of the near-range band excluded from the screen (filled from the"
+            " interior); needs an incidence raster; 0 disables."
+        ),
+    )
+    exclude_noise_factor: float = Field(
+        3.0,
+        gt=0,
+        description=(
+            "Pixels noisier than this × the median empirical noise are excluded, not"
+            " just down-weighted; 0 disables."
+        ),
+    )
+    background_clip_cycles: float = Field(
+        0.2,
+        ge=0,
+        description=(
+            "Drop pixels further than this (cycles of the screen at A) from the 10 km"
+            " background; 0 disables."
+        ),
+    )
+    background_block_px: int = Field(
+        250,
+        ge=10,
+        description="Block size of the background median (250 px = 10 km at 40 m).",
+    )
+    strict_network: bool = Field(
+        False,
+        description=(
+            "Require identical A and B pair networks (historical behaviour). Off: use"
+            " the common real-date network, which is what forward mode needs."
         ),
     )
     resume: bool = True

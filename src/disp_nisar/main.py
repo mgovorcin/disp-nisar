@@ -77,14 +77,9 @@ def run(
     if use_main_diff:
         if pge_runconfig.input_file_group.frequency != "frequencyA":
             raise ValueError("main_diff requires a nominal frequencyA workflow")
-        if (
-            pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD"
-            or any("compressed" in f.name.lower() for f in cfg.cslc_file_list)
-        ):
-            raise ValueError(
-                "main_diff supports uncompressed historical GSLC stacks only;"
-                " forward/compressed A/B state is not yet supported"
-            )
+        # Forward mode / compressed SLCs: D is estimated on the common real-date pair
+        # network (disp_nisar.ionosphere.network.select_pairs); B is run fresh on the
+        # batch's real epochs.
         if (
             pge_runconfig.dynamic_ancillary_file_group.ionosphere_algorithm_parameters_file
             is None
@@ -464,6 +459,11 @@ def _run_main_diff_workflow(
     gslc_by_date = {}
     frequencies = None
     for path in cfg.cslc_file_list:
+        if "compressed" in Path(path).name.lower():
+            # forward mode: compressed SLCs are not GSLC granules (no mask layer, no
+            # single epoch); the two-band network is restricted to real-date pairs by
+            # select_pairs
+            continue
         date = get_dates(path)[0].replace(hour=0, minute=0, second=0, microsecond=0)
         if date in gslc_by_date:
             raise ValueError(f"Duplicate GSLC acquisition: {date}")
@@ -477,6 +477,12 @@ def _run_main_diff_workflow(
     if frequencies is None:
         raise ValueError("No GSLC inputs for main_diff")
     ref = read_reference_point(product_paths[0].parent)
+    if cfg.correction_options.geometry_files and options.near_range_exclude_km > 0:
+        # static-layer incidence angle: locates the near-range band the screen must not
+        # be estimated from
+        options = options.model_copy(
+            update={"incidence_path": Path(cfg.correction_options.geometry_files[0])}
+        )
     result = run_main_diff_estimation(
         band_a=BandInputs(
             full_outputs.stitched_ifg_paths,
